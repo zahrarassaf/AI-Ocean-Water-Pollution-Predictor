@@ -1,5 +1,5 @@
 """
-Configuration loader utility for the project
+Configuration loader with singleton pattern for OceanPredict
 """
 
 import yaml
@@ -10,41 +10,58 @@ import logging
 logger = logging.getLogger(__name__)
 
 class ConfigLoader:
-    """Load and manage configuration settings"""
+    """Singleton configuration loader with dot notation access"""
     
-    def __init__(self, config_path: Optional[str] = None):
+    _instance = None
+    
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super(ConfigLoader, cls).__new__(cls)
+            cls._instance._initialized = False
+        return cls._instance
+    
+    def __init__(self):
+        if not self._initialized:
+            self.configs = {}
+            self._load_all_configs()
+            self._initialized = True
+    
+    def _load_all_configs(self):
+        """Load all configuration files from config directory"""
+        config_dir = Path(__file__).parent.parent.parent / "config"
+        
+        for config_file in config_dir.glob("*.yaml"):
+            try:
+                with open(config_file, 'r') as f:
+                    config_name = config_file.stem
+                    self.configs[config_name] = yaml.safe_load(f)
+                logger.info(f"Loaded configuration: {config_name}")
+            except Exception as e:
+                logger.error(f"Error loading {config_file}: {e}")
+    
+    def get(self, key: str, default: Any = None, config: str = "settings") -> Any:
         """
-        Initialize configuration loader
+        Get configuration value using dot notation
         
         Parameters
         ----------
-        config_path : str, optional
-            Path to configuration file
+        key : str
+            Dot notation key (e.g., 'project.name')
+        default : Any
+            Default value if key not found
+        config : str
+            Configuration file name (without .yaml)
+            
+        Returns
+        -------
+        Any
+            Configuration value
         """
-        if config_path is None:
-            config_path = Path(__file__).parent.parent.parent / "config" / "settings.yaml"
+        if config not in self.configs:
+            return default
         
-        self.config_path = Path(config_path)
-        self.config = self._load_config()
-    
-    def _load_config(self) -> Dict[str, Any]:
-        """Load configuration from YAML file"""
-        try:
-            with open(self.config_path, 'r') as f:
-                config = yaml.safe_load(f)
-            logger.info(f"Configuration loaded from {self.config_path}")
-            return config
-        except FileNotFoundError:
-            logger.error(f"Configuration file not found: {self.config_path}")
-            raise
-        except yaml.YAMLError as e:
-            logger.error(f"Error parsing configuration file: {e}")
-            raise
-    
-    def get(self, key: str, default: Any = None) -> Any:
-        """Get configuration value by key"""
         keys = key.split('.')
-        value = self.config
+        value = self.configs[config]
         
         for k in keys:
             if isinstance(value, dict) and k in value:
@@ -54,27 +71,27 @@ class ConfigLoader:
         
         return value
     
-    def update(self, updates: Dict[str, Any]) -> None:
-        """Update configuration with new values"""
-        for key, value in updates.items():
-            keys = key.split('.')
-            config_level = self.config
-            
-            for k in keys[:-1]:
-                if k not in config_level:
-                    config_level[k] = {}
-                config_level = config_level[k]
-            
-            config_level[keys[-1]] = value
+    def update(self, key: str, value: Any, config: str = "settings") -> None:
+        """Update configuration value"""
+        if config not in self.configs:
+            self.configs[config] = {}
         
-        logger.info("Configuration updated")
+        keys = key.split('.')
+        config_level = self.configs[config]
+        
+        for k in keys[:-1]:
+            if k not in config_level:
+                config_level[k] = {}
+            config_level = config_level[k]
+        
+        config_level[keys[-1]] = value
+        logger.info(f"Updated config {config}.{key} = {value}")
     
-    def save(self, output_path: Optional[str] = None) -> None:
+    def save(self, config: str = "settings") -> None:
         """Save configuration to file"""
-        if output_path is None:
-            output_path = self.config_path
+        config_file = Path(__file__).parent.parent.parent / "config" / f"{config}.yaml"
         
-        with open(output_path, 'w') as f:
-            yaml.dump(self.config, f, default_flow_style=False)
+        with open(config_file, 'w') as f:
+            yaml.dump(self.configs[config], f, default_flow_style=False)
         
-        logger.info(f"Configuration saved to {output_path}")
+        logger.info(f"Saved configuration to {config_file}")
