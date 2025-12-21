@@ -1,0 +1,80 @@
+project:
+  name: "Petroleum-to-Planet"
+  author: "Zahra Rassaf"
+  version: "1.0.0"
+  description: "Environmental Data Science Portfolio"
+
+data_paths:
+  raw_data: "data/raw"
+  processed_data: "data/processed"
+  results: "results"
+
+region:
+  name: "Gulf of Mexico"
+  latitude:
+    min: 18.0
+    max: 30.0
+  longitude:
+    min: -98.0
+    max: -88.0
+  spatial_resolution: 0.1
+
+time_period:
+  start: "2022-01-01"
+  end: "2023-12-31"
+  temporal_resolution: "daily"
+
+cmems_variables:
+  primary_productivity: ["nppv", "pp", "primary_production"]
+  chlorophyll: ["chl", "chlorophyll_a", "CHLA"]
+  diffuse_attenuation: ["kd490", "Kd_490"]
+  secchi_depth: ["zsd", "secchi_depth"]
+  backscattering: ["bbp", "bbp443"]
+  cdom: ["cdm", "adg443", "colored_dissolved_organic_matter"]
+  eastward_current: ["uo", "eastward_sea_water_velocity"]
+  northward_current: ["vo", "northward_sea_water_velocity"]
+
+models:
+  random_forest:
+    n_estimators: 100
+    max_depth: null
+    min_samples_split: 2
+    min_samples_leaf: 1
+    random_state: 42
+    n_jobs: -1
+  
+  gaussian_process:
+    kernel: "RBF"
+    n_restarts_optimizer: 10
+    random_state: 42
+  
+  neural_network:
+    hidden_layers: [64, 32, 16]
+    dropout_rate: 0.2
+    learning_rate: 0.001
+    epochs: 100
+    batch_size: 32
+  
+  oil_spill:
+    diffusion_coefficient: 0.01
+    wind_drift_factor: 0.03
+    stokes_drift_factor: 0.01
+    time_step_hours: 1.0
+    max_simulation_hours: 168
+    particle_count: 1000
+
+visualization:
+  style: "publication"
+  colormaps:
+    primary_productivity: "viridis"
+    chlorophyll: "YlGn"
+    current: "RdBu_r"
+    uncertainty: "plasma"
+    oil_concentration: "hot_r"
+  figure_size: [12, 8]
+  dpi: 300
+
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file: "pipeline.log"
