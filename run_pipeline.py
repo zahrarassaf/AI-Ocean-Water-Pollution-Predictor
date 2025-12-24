@@ -111,6 +111,12 @@ try:
     from src.data.loader import MarineDataLoader
     from src.data.preprocessor import DataPreprocessor
     available_modules['data_loader'] = True
+    
+    # Check MarineDataLoader constructor signature
+    import inspect
+    loader_signature = inspect.signature(MarineDataLoader.__init__)
+    loader_params = list(loader_signature.parameters.keys())
+    print(f"DEBUG: MarineDataLoader parameters: {loader_params}")
 except ImportError as e:
     print(f"Warning: Data loader/preprocessor not available: {e}")
     available_modules['data_loader'] = False
@@ -364,15 +370,29 @@ class MarinePollutionPipeline:
             return
         
         try:
-            self.data_loader = MarineDataLoader(
-                data_dir=self.config.data.raw_dir,
-                config=self.config.data
-            )
+            # Try different constructor signatures for MarineDataLoader
+            try:
+                # Try with data_dir parameter first
+                self.data_loader = MarineDataLoader(
+                    data_dir=self.config.data.raw_dir,
+                    config=self.config.data
+                )
+            except TypeError:
+                # Try with just config parameter
+                try:
+                    self.data_loader = MarineDataLoader(config=self.config.data)
+                except TypeError:
+                    # Try default constructor
+                    self.data_loader = MarineDataLoader()
             
             # Load all NetCDF files
             dataset = self.data_loader.load_all_datasets()
             
-            self.preprocessor = DataPreprocessor(config=self.config.data)
+            # Try different constructor signatures for DataPreprocessor
+            try:
+                self.preprocessor = DataPreprocessor(config=self.config.data)
+            except TypeError:
+                self.preprocessor = DataPreprocessor()
             
             # Process data
             processed_data = self.preprocessor.process(dataset)
