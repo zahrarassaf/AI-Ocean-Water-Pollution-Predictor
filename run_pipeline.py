@@ -76,8 +76,8 @@ except ImportError as e:
                 def __init__(self):
                     self.raw_dir = Path("data/raw")
                     self.processed_dir = Path("data/processed")
-                    self.target_variable = "pollution_level"
-                    self.feature_variables = ["temperature", "salinity", "ph", "turbidity"]
+                    self.target_variable = "chlorophyll_concentration"
+                    self.feature_variables = ["diffuse_attenuation", "primary_productivity", "secchi_depth"]
                     self.source = type('obj', (object,), {'value': 'local'})()
             
             class ModelConfig:
@@ -109,7 +109,6 @@ except ImportError as e:
 
 try:
     from src.data.loader import MarineDataLoader
-    from src.data.preprocessor import DataPreprocessor
     available_modules['data_loader'] = True
     
     # Check MarineDataLoader methods
@@ -122,8 +121,106 @@ try:
         sig = inspect.signature(MarineDataLoader.load_marine_dataset)
         print(f"DEBUG: load_marine_dataset signature: {sig}")
 except ImportError as e:
-    print(f"Warning: Data loader/preprocessor not available: {e}")
+    print(f"Warning: Data loader not available: {e}")
     available_modules['data_loader'] = False
+
+# Try to import original preprocessor
+try:
+    from src.data.preprocessor import DataPreprocessor
+    available_modules['preprocessor'] = True
+    print("INFO: Using original DataPreprocessor")
+except ImportError as e:
+    print(f"Warning: Original DataPreprocessor not available: {e}")
+    available_modules['preprocessor'] = False
+
+# Import simple preprocessor as fallback
+try:
+    # First try to import the simple version we just created
+    from src.data.simple_preprocessor import SimpleDataPreprocessor
+    available_modules['simple_preprocessor'] = True
+    print("INFO: Using SimpleDataPreprocessor")
+except ImportError:
+    # Create inline simple preprocessor
+    print("INFO: Creating inline SimpleDataPreprocessor")
+    class SimpleDataPreprocessor:
+        def __init__(self, config=None):
+            self.config = config or {}
+            import numpy as np
+        
+        def process(self, dataset):
+            """Basic processing of xarray dataset."""
+            print(f"DEBUG: Processing dataset with {len(dataset.data_vars)} variables")
+            
+            # Simple processing: convert to numpy array
+            data_arrays = []
+            feature_names = []
+            
+            for var_name, var_data in dataset.data_vars.items():
+                # Flatten the data
+                flat_data = var_data.values.flatten()
+                data_arrays.append(flat_data)
+                feature_names.append(var_name)
+            
+            # Stack arrays
+            import numpy as np
+            X = np.column_stack(data_arrays)
+            
+            # Remove rows with NaN
+            valid_mask = ~np.any(np.isnan(X), axis=1)
+            X = X[valid_mask]
+            
+            return {
+                'X': X,
+                'feature_names': feature_names,
+                'valid_mask': valid_mask
+            }
+        
+        def prepare_features(self, processed_data, target_var=None, feature_vars=None):
+            """Prepare features and target."""
+            X = processed_data['X']
+            feature_names = processed_data['feature_names']
+            
+            # Default target is first variable
+            if target_var is None:
+                target_var = feature_names[0]
+            
+            # Default features are all except target
+            if feature_vars is None:
+                feature_vars = [f for f in feature_names if f != target_var]
+            
+            # Find indices
+            try:
+                target_idx = feature_names.index(target_var)
+            except ValueError:
+                print(f"Warning: Target '{target_var}' not found, using first variable")
+                target_idx = 0
+                target_var = feature_names[0]
+            
+            feature_indices = []
+            selected_features = []
+            for f in feature_vars:
+                try:
+                    idx = feature_names.index(f)
+                    feature_indices.append(idx)
+                    selected_features.append(f)
+                except ValueError:
+                    print(f"Warning: Feature '{f}' not found")
+            
+            if not feature_indices:
+                # Use all other variables as features
+                feature_indices = [i for i in range(len(feature_names)) if i != target_idx]
+                selected_features = [feature_names[i] for i in feature_indices]
+            
+            # Split data
+            y = X[:, target_idx]
+            X_features = X[:, feature_indices]
+            
+            print(f"DEBUG: Final features: {selected_features}, target: {target_var}")
+            print(f"DEBUG: X shape: {X_features.shape}, y shape: {y.shape}")
+            
+            return X_features, y, selected_features
+    
+    available_modules['simple_preprocessor'] = True
 
 # Try to import splitter
 try:
@@ -299,7 +396,7 @@ class MarinePollutionPipeline:
                 if step == 'download' and not available_modules['downloader']:
                     self._log_message("warning", "Download step skipped - downloader module not available")
                 elif step == 'process' and not available_modules['data_loader']:
-                    self._log_message("warning", "Process step skipped - data loader/preprocessor modules not available")
+                    self._log_message("warning", "Process step skipped - data loader not available")
                 elif step == 'train' and not available_modules['trainer']:
                     self._log_message("warning", "Train step skipped - trainer module not available")
                 elif step == 'evaluate' and not available_modules['analyzer']:
@@ -374,7 +471,7 @@ class MarinePollutionPipeline:
         self._log_message("info", "Step 2: Processing marine data")
         
         if not available_modules['data_loader']:
-            self._log_message("error", "Data loader/preprocessor modules not available. Cannot process data.")
+            self._log_message("error", "Data loader not available. Cannot process data.")
             return
         
         try:
@@ -404,20 +501,12 @@ class MarinePollutionPipeline:
                 try:
                     self._log_message("info", f"Loading {nc_file.name}...")
                     
-                    # Try different loading approaches
-                    if hasattr(self.data_loader, 'load_marine_dataset'):
-                        # Method requires filepath
-                        dataset = self.data_loader.load_marine_dataset(str(nc_file))
-                    elif hasattr(self.data_loader, 'load_multiple_datasets'):
-                        # Method might load multiple files
-                        dataset = self.data_loader.load_multiple_datasets([str(nc_file)])
-                    else:
-                        self._log_message("error", "No suitable loading method found")
-                        return
+                    # Load dataset
+                    dataset = self.data_loader.load_marine_dataset(str(nc_file))
                     
                     if dataset is not None:
                         all_datasets.append(dataset)
-                        self._log_message("info", f"✓ Loaded {nc_file.name}")
+                        self._log_message("info", f"✓ Loaded {nc_file.name} with variables: {list(dataset.data_vars)}")
                     else:
                         self._log_message("warning", f"Failed to load {nc_file.name}")
                         
@@ -445,11 +534,17 @@ class MarinePollutionPipeline:
                     # Use first dataset as fallback
                     combined_dataset = all_datasets[0]
             
-            # Initialize DataPreprocessor
-            try:
-                self.preprocessor = DataPreprocessor(config=self.config.data)
-            except TypeError:
-                self.preprocessor = DataPreprocessor()
+            # Initialize preprocessor
+            if available_modules['preprocessor']:
+                try:
+                    self.preprocessor = DataPreprocessor(config=self.config.data)
+                    self._log_message("info", "Using original DataPreprocessor")
+                except Exception as e:
+                    self._log_message("warning", f"Failed to initialize original preprocessor: {e}")
+                    self.preprocessor = SimpleDataPreprocessor(self.config.data)
+            else:
+                self.preprocessor = SimpleDataPreprocessor(self.config.data)
+                self._log_message("info", "Using SimpleDataPreprocessor")
             
             # Process data
             processed_data = self.preprocessor.process(combined_dataset)
