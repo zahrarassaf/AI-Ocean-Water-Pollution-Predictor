@@ -20,14 +20,17 @@ from src.utils.config import ConfigManager, ExperimentConfig
 from src.data.downloader import MarineDataManager
 from src.data.loader import MarineDataLoader
 from src.data.preprocessor import DataPreprocessor
-# خط 23 - با try-except محافظت می‌کنیم
+
+# Handle ModelTrainer import with fallback
 try:
     from src.models.trainer import ModelTrainer
+    TRAINER_AVAILABLE = True
 except ImportError as e:
-    print(f"Import error for ModelTrainer: {e}")
-    print("Note: You may need to download data first before training.")
-    # ModelTrainer را به None تنظیم می‌کنیم تا بعداً کنترل شود
+    print(f"Warning: ModelTrainer import failed: {e}")
+    print("Training step will be skipped. Please ensure trainer.py exists in src/models/")
+    TRAINER_AVAILABLE = False
     ModelTrainer = None
+
 from src.evaluation.analyzer import ModelAnalyzer
 
 
@@ -129,6 +132,12 @@ class MarinePollutionPipeline:
             if steps is None:
                 steps = ['download', 'process', 'train', 'evaluate']
             
+            # Remove 'train' and 'evaluate' if trainer not available
+            if not TRAINER_AVAILABLE:
+                steps = [step for step in steps if step not in ['train', 'evaluate']]
+                if 'train' in steps or 'evaluate' in steps:
+                    self.logger.warning("Model training/evaluation steps skipped - trainer module not available")
+            
             self.logger.info(f"Pipeline steps to execute: {', '.join(steps)}")
             
             # Execute pipeline steps
@@ -168,7 +177,7 @@ class MarinePollutionPipeline:
             self.data_manager = MarineDataManager(data_dir=self.config.data.raw_dir.parent)
             
             download_report = self.data_manager.download_all_datasets(
-                force_redownload=False  # Don't re-download existing files
+                force_redownload=False
             )
             
             # Log download results
@@ -261,16 +270,12 @@ class MarinePollutionPipeline:
             self.logger.main_logger.error("Data not processed. Run process step first.")
             return
         
+        if not TRAINER_AVAILABLE:
+            self.logger.main_logger.error("ModelTrainer module not available. Cannot train model.")
+            self.logger.main_logger.error("Please ensure src/models/trainer.py exists and is properly configured.")
+            return
+        
         try:
-            # Check if ModelTrainer is available
-            if ModelTrainer is None:
-                self.logger.main_logger.error(
-                    "ModelTrainer module not available. "
-                    "This may be because data hasn't been downloaded yet. "
-                    "Please run the download step first, or check if src/models/trainer.py exists."
-                )
-                return
-            
             # Initialize trainer
             self.trainer = ModelTrainer(
                 config=self.config,
@@ -461,7 +466,7 @@ def main():
         pipeline.run(steps=args.steps)
         
         print("\n" + "="*80)
-        print("PIPELINE EXECUTION COMPLETED SUCCESSFULLY")
+        print("PIPELINE EXECUTION COMPLETED")
         print("="*80)
         print(f"Experiment ID: {config.experiment_id}")
         print(f"Results directory: {config.output_dir / config.experiment_id}")
