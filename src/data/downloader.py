@@ -1,396 +1,597 @@
 """
-Data downloader for OceanPredict with support for multiple sources
+Professional Google Drive downloader for NetCDF files.
+Supports resume, validation, and comprehensive error handling.
 """
 
-import requests
-import gdown
-import xarray as xr
-import pandas as pd
-import numpy as np
+import os
+import re
+import sys
+import time
+import hashlib
+import logging
+import tempfile
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
-import logging
-import zipfile
-import tarfile
-from tqdm import tqdm
-import hashlib
-import json
+from datetime import datetime, timedelta
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from ..utils.config_loader import ConfigLoader
+import gdown
+import requests
+import numpy as np
+import xarray as xr
+from tqdm import tqdm
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 logger = logging.getLogger(__name__)
 
-class DataDownloader:
-    """Download and manage oceanographic data from multiple sources"""
+
+class DriveDownloadError(Exception):
+    """Custom exception for download errors."""
+    pass
+
+
+class NetCDFValidator:
+    """Validate NetCDF file structure and integrity."""
     
-    def __init__(self):
-        self.config = ConfigLoader()
-        self.download_dir = Path("data/raw")
-        self.download_dir.mkdir(parents=True, exist_ok=True)
+    @staticmethod
+    def validate_file(filepath: Path) -> Dict:
+        """Validate NetCDF file and return metadata."""
+        try:
+            with xr.open_dataset(filepath, engine='netcdf4') as ds:
+                metadata = {
+                    'valid': True,
+                    'variables': list(ds.data_vars),
+                    'dimensions': dict(ds.dims),
+                    'attributes': dict(ds.attrs),
+                    'coords': list(ds.coords),
+                    'file_size': filepath.stat().st_size,
+                    'checksum': NetCDFValidator.calculate_checksum(filepath)
+                }
+                
+                # Check for required oceanographic variables
+                required_vars = ['lat', 'lon', 'time']
+                metadata['has_required_vars'] = all(v in metadata['coords'] 
+                                                   for v in required_vars)
+                
+                # Calculate variable statistics
+                variable_stats = {}
+                for var in ds.data_vars:
+                    data = ds[var].values
+                    variable_stats[var] = {
+                        'dtype': str(ds[var].dtype),
+                        'shape': ds[var].shape,
+                        'nan_percentage': float(np.isnan(data).sum() / data.size * 100),
+                        'min': float(np.nanmin(data)),
+                        'max': float(np.nanmax(data)),
+                        'mean': float(np.nanmean(data)),
+                        'std': float(np.nanstd(data))
+                    }
+                metadata['variable_stats'] = variable_stats
+                
+                return metadata
+                
+        except Exception as e:
+            return {
+                'valid': False,
+                'error': str(e),
+                'file_size': filepath.stat().st_size if filepath.exists() else 0
+            }
+    
+    @staticmethod
+    def calculate_checksum(filepath: Path, chunk_size: int = 8192) -> str:
+        """Calculate MD5 checksum for file validation."""
+        md5 = hashlib.md5()
+        with open(filepath, 'rb') as f:
+            for chunk in iter(lambda: f.read(chunk_size), b''):
+                md5.update(chunk)
+        return md5.hexdigest()
+
+
+class RetryableSession:
+    """HTTP session with retry logic for resilient downloads."""
+    
+    def __init__(self, max_retries: int = 3, backoff_factor: float = 0.3):
+        self.session = requests.Session()
         
-        # Load dataset configuration
-        self.dataset_config = self.config.get("datasets", {}, config="datasets")
+        retry_strategy = Retry(
+            total=max_retries,
+            backoff_factor=backoff_factor,
+            status_forcelist=[429, 500, 502, 503, 504],
+            allowed_methods=["GET", "HEAD"]
+        )
         
-    def download_sample_data(self) -> Dict[str, Path]:
+        adapter = HTTPAdapter(max_retries=retry_strategy)
+        self.session.mount("http://", adapter)
+        self.session.mount("https://", adapter)
+        
+        # Set reasonable timeout
+        self.session.request = lambda method, url, **kwargs: requests.Session.request(
+            self.session, method, url, timeout=(30, 300), **kwargs
+        )
+    
+    def get(self, url: str, **kwargs):
+        return self.session.get(url, **kwargs)
+
+
+class GoogleDriveDownloader:
+    """
+    Professional Google Drive downloader with comprehensive features:
+    - Resume broken downloads
+    - Parallel downloads
+    - Checksum validation
+    - Progress tracking
+    - Error recovery
+    """
+    
+    def __init__(
+        self,
+        output_dir: Union[str, Path] = "data/raw",
+        max_workers: int = 4,
+        chunk_size: int = 1024 * 1024,  # 1MB
+        timeout: int = 300
+    ):
+        self.output_dir = Path(output_dir)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        
+        self.max_workers = max_workers
+        self.chunk_size = chunk_size
+        self.timeout = timeout
+        
+        self.session = RetryableSession()
+        self.validator = NetCDFValidator()
+        
+        # Cache for downloaded files
+        self.download_cache = self.output_dir / ".download_cache.json"
+        
+        logger.info(f"Initialized GoogleDriveDownloader with output_dir: {self.output_dir}")
+    
+    @staticmethod
+    def extract_file_id(url: str) -> Optional[str]:
+        """Extract file ID from Google Drive URL."""
+        patterns = [
+            r'/file/d/([a-zA-Z0-9_-]+)',
+            r'id=([a-zA-Z0-9_-]+)',
+            r'/d/([a-zA-Z0-9_-]+)/',
+            r'/d/([a-zA-Z0-9_-]+)$',
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, url)
+            if match:
+                return match.group(1)
+        
+        raise DriveDownloadError(f"Could not extract file ID from URL: {url}")
+    
+    def download_file(
+        self,
+        url: str,
+        filename: Optional[str] = None,
+        force_redownload: bool = False,
+        validate: bool = True
+    ) -> Dict:
         """
-        Download sample datasets for testing
+        Download a single file from Google Drive.
         
-        Returns
-        -------
-        Dict[str, Path]
-            Dictionary mapping data type to file path
+        Returns:
+            Dict containing download results and file metadata.
         """
-        logger.info("Downloading sample datasets...")
+        start_time = datetime.now()
         
-        sample_config = self.dataset_config.get("sample", {})
-        base_url = sample_config.get("base_url", "")
-        
-        downloaded_files = {}
-        
-        for data_type, filename in sample_config.get("files", {}).items():
-            url = f"{base_url}{filename}"
-            output_path = self.download_dir / filename
+        try:
+            file_id = self.extract_file_id(url)
+            
+            if not filename:
+                filename = f"dataset_{file_id}.nc"
+            
+            output_path = self.output_dir / filename
+            
+            # Check if file already exists and is valid
+            if not force_redownload and output_path.exists():
+                validation = self.validator.validate_file(output_path)
+                if validation['valid']:
+                    logger.info(f"File already exists and valid: {filename}")
+                    return {
+                        'status': 'exists',
+                        'filename': filename,
+                        'path': str(output_path),
+                        'validation': validation,
+                        'download_time': 0,
+                        'size_mb': output_path.stat().st_size / (1024 * 1024)
+                    }
+            
+            # Download using gdown with resume capability
+            download_url = f"https://drive.google.com/uc?id={file_id}&export=download"
+            
+            logger.info(f"Downloading: {filename} from {url}")
+            
+            # Create temporary file for download
+            temp_path = output_path.with_suffix('.download')
             
             try:
-                self._download_file(url, output_path)
+                gdown.download(
+                    download_url,
+                    str(temp_path),
+                    quiet=False,
+                    resume=True,
+                    fuzzy=True
+                )
                 
-                # Verify download
-                if output_path.exists():
-                    downloaded_files[data_type] = output_path
-                    size_mb = output_path.stat().st_size / (1024 ** 2)
-                    logger.info(f"✓ Downloaded {data_type}: {size_mb:.1f} MB")
-                else:
-                    logger.error(f"Failed to download {data_type}")
-                    
+                # Move temp file to final location
+                temp_path.rename(output_path)
+                
+                download_time = (datetime.now() - start_time).total_seconds()
+                
+                # Validate downloaded file
+                validation = {}
+                if validate:
+                    validation = self.validator.validate_file(output_path)
+                    if not validation['valid']:
+                        raise DriveDownloadError(f"Downloaded file is invalid: {validation.get('error', 'Unknown error')}")
+                
+                result = {
+                    'status': 'success',
+                    'filename': filename,
+                    'path': str(output_path),
+                    'validation': validation,
+                    'download_time': download_time,
+                    'size_mb': output_path.stat().st_size / (1024 * 1024),
+                    'checksum': NetCDFValidator.calculate_checksum(output_path)
+                }
+                
+                logger.info(f"Successfully downloaded {filename} ({result['size_mb']:.2f} MB) in {download_time:.1f}s")
+                return result
+                
             except Exception as e:
-                logger.error(f"Error downloading {data_type}: {e}")
-        
-        return downloaded_files
+                # Clean up temp file on error
+                if temp_path.exists():
+                    temp_path.unlink()
+                raise
+                
+        except Exception as e:
+            logger.error(f"Failed to download {url}: {e}")
+            return {
+                'status': 'failed',
+                'filename': filename or 'unknown',
+                'error': str(e),
+                'download_time': (datetime.now() - start_time).total_seconds()
+            }
     
-    def download_full_data(self, data_types: Optional[List[str]] = None) -> Dict[str, Path]:
+    def download_batch(
+        self,
+        urls: List[str],
+        filenames: Optional[List[str]] = None,
+        force_redownload: bool = False,
+        max_parallel: Optional[int] = None
+    ) -> Dict[str, Dict]:
         """
-        Download full datasets from Google Drive
+        Download multiple files in parallel.
         
-        Parameters
-        ----------
-        data_types : List[str], optional
-            Specific data types to download, defaults to all
+        Returns:
+            Dict mapping filenames to download results.
+        """
+        if filenames and len(urls) != len(filenames):
+            raise ValueError("URLs and filenames must have the same length")
+        
+        if not filenames:
+            filenames = [f"dataset_{self.extract_file_id(url)}.nc" for url in urls]
+        
+        results = {}
+        max_workers = min(self.max_workers, max_parallel or self.max_workers)
+        
+        logger.info(f"Starting batch download of {len(urls)} files with {max_workers} workers")
+        
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Create futures
+            future_to_url = {}
+            for url, filename in zip(urls, filenames):
+                future = executor.submit(
+                    self.download_file,
+                    url=url,
+                    filename=filename,
+                    force_redownload=force_redownload
+                )
+                future_to_url[future] = (url, filename)
             
-        Returns
-        -------
-        Dict[str, Path]
-            Dictionary mapping data type to file path
+            # Process results as they complete
+            for future in tqdm(as_completed(future_to_url), total=len(future_to_url), desc="Downloading"):
+                url, filename = future_to_url[future]
+                try:
+                    result = future.result()
+                    results[filename] = result
+                except Exception as e:
+                    logger.error(f"Error downloading {filename}: {e}")
+                    results[filename] = {
+                        'status': 'failed',
+                        'filename': filename,
+                        'error': str(e)
+                    }
+        
+        # Generate summary statistics
+        successful = sum(1 for r in results.values() if r['status'] == 'success')
+        existing = sum(1 for r in results.values() if r['status'] == 'exists')
+        failed = sum(1 for r in results.values() if r['status'] == 'failed')
+        
+        summary = {
+            'total': len(urls),
+            'successful': successful,
+            'existing': existing,
+            'failed': failed,
+            'total_size_mb': sum(r.get('size_mb', 0) for r in results.values() if 'size_mb' in r),
+            'results': results
+        }
+        
+        logger.info(f"Batch download completed: {successful} new, {existing} existing, {failed} failed")
+        
+        return summary
+    
+    def validate_downloads(self, filenames: Optional[List[str]] = None) -> Dict:
+        """Validate all downloaded files."""
+        if not filenames:
+            filenames = [f.name for f in self.output_dir.glob("*.nc")]
+        
+        validation_results = {}
+        
+        for filename in filenames:
+            filepath = self.output_dir / filename
+            if filepath.exists():
+                validation_results[filename] = self.validator.validate_file(filepath)
+            else:
+                validation_results[filename] = {'valid': False, 'error': 'File not found'}
+        
+        valid_count = sum(1 for v in validation_results.values() if v['valid'])
+        
+        return {
+            'total': len(filenames),
+            'valid': valid_count,
+            'invalid': len(filenames) - valid_count,
+            'details': validation_results
+        }
+
+
+class MarineDataManager:
+    """
+    High-level manager for marine data download and processing.
+    """
+    
+    # Pre-defined marine dataset configurations
+    DATASET_CONFIGS = {
+        'chlorophyll': {
+            'url': 'https://drive.google.com/file/d/17YEvHDE9DmtLsXKDGYwrGD8OE46swNDc/view',
+            'filename': 'chlorophyll_concentration.nc',
+            'expected_vars': ['chl', 'lat', 'lon', 'time']
+        },
+        'light_attenuation': {
+            'url': 'https://drive.google.com/file/d/16DyROUrgvfRQRvrBS3W3Y4o44vd-ZB67/view',
+            'filename': 'diffuse_attenuation.nc',
+            'expected_vars': ['kd490', 'lat', 'lon', 'time']
+        },
+        'water_clarity': {
+            'url': 'https://drive.google.com/file/d/1c3f92nsOCY5hJv3zy0SAPXf8WsAVYNVI/view',
+            'filename': 'secchi_depth.nc',
+            'expected_vars': ['zsd', 'lat', 'lon', 'time']
+        },
+        'primary_productivity': {
+            'url': 'https://drive.google.com/file/d/1JapTCN9CLn_hy9CY4u3Gcanv283LBdXy/view',
+            'filename': 'primary_productivity.nc',
+            'expected_vars': ['pp', 'lat', 'lon', 'time']
+        }
+    }
+    
+    def __init__(self, data_dir: Union[str, Path] = "data"):
+        self.data_dir = Path(data_dir)
+        self.raw_dir = self.data_dir / "raw"
+        self.processed_dir = self.data_dir / "processed"
+        
+        self.downloader = GoogleDriveDownloader(output_dir=self.raw_dir)
+        
+        # Ensure directories exist
+        self.raw_dir.mkdir(parents=True, exist_ok=True)
+        self.processed_dir.mkdir(parents=True, exist_ok=True)
+        
+        logger.info(f"Initialized MarineDataManager with data_dir: {self.data_dir}")
+    
+    def download_all_datasets(
+        self,
+        datasets: Optional[List[str]] = None,
+        force_redownload: bool = False
+    ) -> Dict:
         """
-        logger.info("Downloading full datasets from Google Drive...")
+        Download all configured marine datasets.
         
-        full_config = self.dataset_config.get("full", {})
-        organization = self.dataset_config.get("organization", {})
+        Args:
+            datasets: List of dataset names to download (None for all)
+            force_redownload: Whether to re-download existing files
+            
+        Returns:
+            Comprehensive download summary
+        """
+        if datasets is None:
+            datasets = list(self.DATASET_CONFIGS.keys())
         
-        if data_types is None:
-            # Download all datasets
-            data_types = list(full_config.get("files", {}).keys())
+        urls = []
+        filenames = []
         
-        downloaded_files = {}
-        
-        for data_type in data_types:
-            if data_type not in full_config.get("files", {}):
-                logger.warning(f"Dataset {data_type} not found in configuration")
+        for dataset_name in datasets:
+            if dataset_name not in self.DATASET_CONFIGS:
+                logger.warning(f"Unknown dataset: {dataset_name}")
                 continue
             
-            dataset_info = full_config["files"][data_type]
-            url = dataset_info.get("url")
-            
-            if not url:
-                logger.error(f"No URL for {data_type}")
+            config = self.DATASET_CONFIGS[dataset_name]
+            urls.append(config['url'])
+            filenames.append(config['filename'])
+        
+        if not urls:
+            raise ValueError("No valid datasets specified")
+        
+        logger.info(f"Downloading {len(urls)} marine datasets: {', '.join(datasets)}")
+        
+        # Perform batch download
+        download_results = self.downloader.download_batch(
+            urls=urls,
+            filenames=filenames,
+            force_redownload=force_redownload
+        )
+        
+        # Validate downloaded files
+        validation_results = self.downloader.validate_downloads(filenames)
+        
+        # Generate comprehensive report
+        report = {
+            'timestamp': datetime.now().isoformat(),
+            'datasets_requested': datasets,
+            'download_summary': download_results,
+            'validation_summary': validation_results,
+            'missing_variables': self._check_missing_variables(validation_results)
+        }
+        
+        # Save report
+        report_path = self.data_dir / f"download_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        import json
+        with open(report_path, 'w') as f:
+            json.dump(report, f, indent=2, default=str)
+        
+        logger.info(f"Download report saved to: {report_path}")
+        
+        return report
+    
+    def _check_missing_variables(self, validation_results: Dict) -> Dict:
+        """Check for missing expected variables in downloaded files."""
+        missing_vars = {}
+        
+        for filename, validation in validation_results.get('details', {}).items():
+            if not validation.get('valid', False):
                 continue
             
-            # Determine target directory
-            target_dir = None
-            for dir_name, dir_types in organization.items():
-                if data_type in dir_types:
-                    target_dir = self.download_dir / dir_name
+            # Find which dataset this file corresponds to
+            dataset_name = None
+            for name, config in self.DATASET_CONFIGS.items():
+                if config['filename'] == filename:
+                    dataset_name = name
                     break
             
-            if not target_dir:
-                target_dir = self.download_dir / data_type
-            
-            target_dir.mkdir(parents=True, exist_ok=True)
-            
-            # Determine filename
-            if data_type == "currents":
-                filename = "currents.nc"
-            elif data_type == "primary_productivity":
-                filename = "pp.nc"
-            elif data_type == "chlorophyll":
-                filename = "chl.nc"
-            else:
-                filename = f"{data_type}.nc"
-            
-            output_path = target_dir / filename
-            
-            try:
-                logger.info(f"Downloading {data_type} ({dataset_info.get('size_gb', 'unknown')} GB)...")
+            if dataset_name:
+                expected_vars = self.DATASET_CONFIGS[dataset_name]['expected_vars']
+                actual_vars = validation.get('variables', []) + validation.get('coords', [])
                 
-                # Download from Google Drive
-                gdown.download(url, str(output_path), quiet=False)
-                
-                # Verify download
-                if output_path.exists():
-                    downloaded_files[data_type] = output_path
-                    size_mb = output_path.stat().st_size / (1024 ** 2)
-                    logger.info(f"✓ Downloaded {data_type}: {size_mb:.1f} MB")
-                    
-                    # Organize into proper directory structure
-                    self._organize_file(output_path, data_type)
-                else:
-                    logger.error(f"Failed to download {data_type}")
-                    
-            except Exception as e:
-                logger.error(f"Error downloading {data_type}: {e}")
-        
-        return downloaded_files
-    
-    def _download_file(self, url: str, output_path: Path, chunk_size: int = 8192) -> None:
-        """Download file with progress bar"""
-        response = requests.get(url, stream=True)
-        response.raise_for_status()
-        
-        total_size = int(response.headers.get('content-length', 0))
-        
-        with open(output_path, 'wb') as f, tqdm(
-            desc=output_path.name,
-            total=total_size,
-            unit='B',
-            unit_scale=True,
-            unit_divisor=1024,
-        ) as pbar:
-            for chunk in response.iter_content(chunk_size=chunk_size):
-                f.write(chunk)
-                pbar.update(len(chunk))
-    
-    def _organize_file(self, file_path: Path, data_type: str) -> None:
-        """Organize downloaded file into proper directory"""
-        organization = self.dataset_config.get("organization", {})
-        
-        for dir_name, dir_types in organization.items():
-            if data_type in dir_types:
-                target_dir = self.download_dir / dir_name
-                target_dir.mkdir(exist_ok=True)
-                
-                # Move file to target directory
-                if data_type == "currents":
-                    new_name = "currents.nc"
-                elif data_type == "primary_productivity":
-                    new_name = "pp.nc"
-                elif data_type == "chlorophyll":
-                    new_name = "chl.nc"
-                else:
-                    new_name = f"{data_type}.nc"
-                
-                target_path = target_dir / new_name
-                file_path.rename(target_path)
-                logger.info(f"  Organized → {dir_name}/{new_name}")
-                break
-    
-    def verify_integrity(self, file_path: Path, expected_md5: Optional[str] = None) -> bool:
-        """Verify file integrity using MD5 checksum"""
-        if not file_path.exists():
-            return False
-        
-        if expected_md5:
-            # Calculate MD5
-            hash_md5 = hashlib.md5()
-            with open(file_path, "rb") as f:
-                for chunk in iter(lambda: f.read(4096), b""):
-                    hash_md5.update(chunk)
-            
-            calculated_md5 = hash_md5.hexdigest()
-            
-            if calculated_md5 != expected_md5:
-                logger.warning(f"MD5 mismatch for {file_path.name}")
-                return False
-        
-        # Try to open the file to verify it's valid
-        try:
-            with xr.open_dataset(file_path) as ds:
-                logger.debug(f"✓ Valid NetCDF file: {file_path.name}")
-                return True
-        except Exception as e:
-            logger.error(f"Invalid NetCDF file {file_path.name}: {e}")
-            return False
-    
-    def create_synthetic_data(self, output_dir: Optional[Path] = None) -> Dict[str, Path]:
-        """
-        Create synthetic data for testing and development
-        
-        Returns
-        -------
-        Dict[str, Path]
-            Dictionary of created synthetic files
-        """
-        if output_dir is None:
-            output_dir = self.download_dir / "synthetic"
-        
-        output_dir.mkdir(parents=True, exist_ok=True)
-        
-        logger.info("Creating synthetic datasets...")
-        
-        # Create time coordinates
-        times = pd.date_range('2023-01-01', periods=10, freq='D')
-        lats = np.linspace(18, 30, 100)
-        lons = np.linspace(-98, -88, 100)
-        
-        synthetic_files = {}
-        
-        # 1. Ocean currents
-        logger.info("Creating synthetic currents...")
-        uo = np.random.randn(len(times), len(lats), len(lons)) * 0.1
-        vo = np.random.randn(len(times), len(lats), len(lons)) * 0.1
-        
-        ds_currents = xr.Dataset(
-            {
-                'uo': (['time', 'lat', 'lon'], uo.astype('float32')),
-                'vo': (['time', 'lat', 'lon'], vo.astype('float32'))
-            },
-            coords={
-                'time': times,
-                'lat': lats,
-                'lon': lons
-            },
-            attrs={
-                'description': 'Synthetic ocean currents',
-                'units': 'm/s',
-                'creator': 'OceanPredict Synthetic Data Generator'
-            }
-        )
-        
-        currents_path = output_dir / "physics_currents" / "currents.nc"
-        currents_path.parent.mkdir(exist_ok=True)
-        ds_currents.to_netcdf(currents_path)
-        synthetic_files['currents'] = currents_path
-        
-        # 2. Primary productivity
-        logger.info("Creating synthetic primary productivity...")
-        pp = np.random.gamma(shape=2, scale=50, size=(len(times), len(lats), len(lons)))
-        
-        ds_pp = xr.Dataset(
-            {
-                'pp': (['time', 'lat', 'lon'], pp.astype('float32'))
-            },
-            coords={
-                'time': times,
-                'lat': lats,
-                'lon': lons
-            },
-            attrs={
-                'description': 'Synthetic primary productivity',
-                'units': 'mg C m^-2 d^-1',
-                'creator': 'OceanPredict Synthetic Data Generator'
-            }
-        )
-        
-        pp_path = output_dir / "bgc_pp" / "pp.nc"
-        pp_path.parent.mkdir(exist_ok=True)
-        ds_pp.to_netcdf(pp_path)
-        synthetic_files['primary_productivity'] = pp_path
-        
-        # 3. Chlorophyll
-        logger.info("Creating synthetic chlorophyll...")
-        chl = np.random.gamma(shape=1.5, scale=0.5, size=(len(times), len(lats), len(lons)))
-        
-        ds_chl = xr.Dataset(
-            {
-                'chl': (['time', 'lat', 'lon'], chl.astype('float32'))
-            },
-            coords={
-                'time': times,
-                'lat': lats,
-                'lon': lons
-            },
-            attrs={
-                'description': 'Synthetic chlorophyll concentration',
-                'units': 'mg m^-3',
-                'creator': 'OceanPredict Synthetic Data Generator'
-            }
-        )
-        
-        chl_path = output_dir / "bgc_plankton" / "chl.nc"
-        chl_path.parent.mkdir(exist_ok=True)
-        ds_chl.to_netcdf(chl_path)
-        synthetic_files['chlorophyll'] = chl_path
-        
-        # 4. Optical properties
-        logger.info("Creating synthetic optical properties...")
-        kd490 = np.random.gamma(shape=1.2, scale=0.1, size=(len(times), len(lats), len(lons)))
-        zsd = 1.0 / (kd490 + 0.01)  # Secchi depth approximation
-        
-        ds_optics = xr.Dataset(
-            {
-                'kd490': (['time', 'lat', 'lon'], kd490.astype('float32')),
-                'zsd': (['time', 'lat', 'lon'], zsd.astype('float32'))
-            },
-            coords={
-                'time': times,
-                'lat': lats,
-                'lon': lons
-            },
-            attrs={
-                'description': 'Synthetic optical properties',
-                'creator': 'OceanPredict Synthetic Data Generator'
-            }
-        )
-        
-        optics_path = output_dir / "bgc_optics" / "optics.nc"
-        optics_path.parent.mkdir(exist_ok=True)
-        ds_optics.to_netcdf(optics_path)
-        synthetic_files['kd490'] = optics_path
-        synthetic_files['zsd'] = optics_path
-        
-        logger.info("✓ Synthetic datasets created successfully")
-        
-        # Save metadata
-        metadata = {
-            'creation_date': pd.Timestamp.now().isoformat(),
-            'datasets': list(synthetic_files.keys()),
-            'grid': {
-                'time_steps': len(times),
-                'lat_points': len(lats),
-                'lon_points': len(lons),
-                'time_range': [str(times[0]), str(times[-1])],
-                'lat_range': [float(lats.min()), float(lats.max())],
-                'lon_range': [float(lons.min()), float(lons.max())]
-            }
-        }
-        
-        metadata_path = output_dir / "synthetic_metadata.json"
-        with open(metadata_path, 'w') as f:
-            json.dump(metadata, f, indent=2)
-        
-        return synthetic_files
-    
-    def get_download_status(self) -> Dict[str, Any]:
-        """Get current download status"""
-        status = {
-            'downloaded': {},
-            'missing': [],
-            'total_size_gb': 0
-        }
-        
-        organization = self.dataset_config.get("organization", {})
-        
-        for dir_name, dir_types in organization.items():
-            dir_path = self.download_dir / dir_name
-            
-            if dir_path.exists():
-                for file_path in dir_path.glob("*.nc"):
-                    size_mb = file_path.stat().st_size / (1024 ** 2)
-                    status['downloaded'][file_path.name] = {
-                        'path': str(file_path),
-                        'size_mb': size_mb,
-                        'directory': dir_name
+                missing = set(expected_vars) - set(actual_vars)
+                if missing:
+                    missing_vars[filename] = {
+                        'dataset': dataset_name,
+                        'missing_variables': list(missing),
+                        'expected': expected_vars,
+                        'actual': actual_vars
                     }
-                    status['total_size_gb'] += size_mb / 1024
         
-        status['total_size_gb'] = round(status['total_size_gb'], 2)
+        return missing_vars
+    
+    def create_data_inventory(self) -> Dict:
+        """Create inventory of all available data files."""
+        inventory = {
+            'raw_files': [],
+            'processed_files': [],
+            'total_size_gb': 0,
+            'last_updated': datetime.now().isoformat()
+        }
         
-        return status
+        # Scan raw directory
+        for filepath in self.raw_dir.glob("*.nc"):
+            stats = filepath.stat()
+            validation = self.downloader.validator.validate_file(filepath)
+            
+            inventory['raw_files'].append({
+                'filename': filepath.name,
+                'size_mb': stats.st_size / (1024 * 1024),
+                'modified': datetime.fromtimestamp(stats.st_mtime).isoformat(),
+                'validation': validation
+            })
+            inventory['total_size_gb'] += stats.st_size / (1024 ** 3)
+        
+        # Scan processed directory
+        for filepath in self.processed_dir.glob("*.*"):
+            stats = filepath.stat()
+            
+            inventory['processed_files'].append({
+                'filename': filepath.name,
+                'size_mb': stats.st_size / (1024 * 1024),
+                'modified': datetime.fromtimestamp(stats.st_mtime).isoformat(),
+                'type': filepath.suffix[1:]  # Remove dot
+            })
+            inventory['total_size_gb'] += stats.st_size / (1024 ** 3)
+        
+        inventory['raw_count'] = len(inventory['raw_files'])
+        inventory['processed_count'] = len(inventory['processed_files'])
+        
+        return inventory
+
+
+def main():
+    """Command-line interface for data download."""
+    import argparse
+    import json
+    
+    parser = argparse.ArgumentParser(description='Download marine data from Google Drive')
+    parser.add_argument('--datasets', nargs='+', 
+                       choices=list(MarineDataManager.DATASET_CONFIGS.keys()),
+                       default=list(MarineDataManager.DATASET_CONFIGS.keys()),
+                       help='Datasets to download')
+    parser.add_argument('--output-dir', default='data',
+                       help='Output directory for downloaded files')
+    parser.add_argument('--force', action='store_true',
+                       help='Force re-download of existing files')
+    parser.add_argument('--validate', action='store_true', default=True,
+                       help='Validate downloaded files')
+    parser.add_argument('--parallel', type=int, default=4,
+                       help='Number of parallel downloads')
+    parser.add_argument('--inventory', action='store_true',
+                       help='Create data inventory without downloading')
+    
+    args = parser.parse_args()
+    
+    # Setup logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler(f"download_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"),
+            logging.StreamHandler()
+        ]
+    )
+    
+    try:
+        manager = MarineDataManager(data_dir=args.output_dir)
+        
+        if args.inventory:
+            inventory = manager.create_data_inventory()
+            print(json.dumps(inventory, indent=2))
+            return
+        
+        report = manager.download_all_datasets(
+            datasets=args.datasets,
+            force_redownload=args.force
+        )
+        
+        # Print summary
+        summary = report['download_summary']
+        print("\n" + "="*60)
+        print("DOWNLOAD SUMMARY")
+        print("="*60)
+        print(f"Total files: {summary['total']}")
+        print(f"Successfully downloaded: {summary['successful']}")
+        print(f"Already existed: {summary['existing']}")
+        print(f"Failed: {summary['failed']}")
+        print(f"Total size: {summary['total_size_mb']:.2f} MB")
+        
+        if summary['failed'] > 0:
+            print("\nFailed downloads:")
+            for filename, result in summary['results'].items():
+                if result['status'] == 'failed':
+                    print(f"  {filename}: {result.get('error', 'Unknown error')}")
+        
+    except Exception as e:
+        logger.error(f"Fatal error: {e}")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
