@@ -1,266 +1,296 @@
 #!/usr/bin/env python3
 """
-Main pipeline script for Environmental Data Science Portfolio
+Main pipeline runner for marine productivity prediction
 """
 
-import argparse
-import logging
 import sys
+import argparse
 from pathlib import Path
-from datetime import datetime
+import logging
 
-# Import project modules
+# Add project root to path
+project_root = Path(__file__).parent
+sys.path.insert(0, str(project_root))
+
+# Import modules with corrected imports
 from src.data.cmems_processor import CMEMSDataProcessor
-from src.analysis.uncertainty_analyzer import PrimaryProductivityUncertaintyAnalyzer
-from src.models.oil_spill_tracker import OilSpillModel, SpillEvent, OilType
-from src.visualization.plotter import EnvironmentalPlotter
-from src.utils.config_loader import ConfigLoader
+from src.data.loader import MarineDataLoader
+from src.data.preprocessor import DataPreprocessor
+from src.features.engineering import FeatureEngineer
+from src.models.ensemble import RandomForestEnsemble
+from src.training.trainer import ModelTrainer
+from src.evaluation.metrics import ModelEvaluator
+from src.utils.logger import setup_logger
 
-# Setup logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('pipeline.log'),
-        logging.StreamHandler(sys.stdout)
-    ]
-)
+def setup_pipeline_logger():
+    """Setup pipeline logger"""
+    logger = setup_logger('pipeline')
+    return logger
 
-logger = logging.getLogger(__name__)
-
-def run_data_processing(config: dict, download_dir: str = None) -> bool:
-    """Run data processing pipeline"""
+def download_data_step(args, logger):
+    """Step 1: Download data"""
+    logger.info("=" * 60)
+    logger.info("STEP 1: DOWNLOAD DATA")
+    logger.info("=" * 60)
+    
     try:
-        logger.info("=" * 70)
-        logger.info("DATA PROCESSING PIPELINE")
-        logger.info("=" * 70)
+        from src.data.google_drive_loader import MarineDataDownloader
         
-        processor = CMEMSDataProcessor(config)
+        downloader = MarineDataDownloader()
         
-        if download_dir:
-            dataset = processor.process_pipeline(download_dir)
-        else:
-            # Load existing processed data
-            processed_file = Path("data/processed/gulf_mexico_processed.nc")
-            if processed_file.exists():
-                import xarray as xr
-                dataset = xr.open_dataset(processed_file)
-                logger.info(f"Loaded existing dataset from {processed_file}")
-            else:
-                raise FileNotFoundError("No processed data found. Please provide download directory.")
+        # Your Google Drive links
+        urls = [
+            "https://drive.google.com/file/d/17YEvHDE9DmtLsXKDGYwrGD8OE46swNDc/view?usp=sharing",
+            "https://drive.google.com/file/d/16DyROUrgvfRQRvrBS3W3Y4o44vd-ZB67/view?usp=sharing",
+            "https://drive.google.com/file/d/1c3f92nsOCY5hJv3zy0SAPXf8WsAVYNVI/view?usp=sharing",
+            "https://drive.google.com/file/d/1JapTCN9CLn_hy9CY4u3Gcanv283LBdXy/view?usp=sharing"
+        ]
         
-        logger.info("Data processing completed successfully")
-        return True, dataset
+        results = downloader.download_all_data(
+            urls=urls,
+            output_dir=args.data_dir
+        )
+        
+        logger.info(f"Download completed: {len(results.get('downloaded_files', {}))} files")
+        
+        return results
+        
+    except Exception as e:
+        logger.error(f"Download failed: {e}")
+        if not args.continue_on_error:
+            raise
+        return {}
+
+def process_data_step(args, logger):
+    """Step 2: Process data"""
+    logger.info("=" * 60)
+    logger.info("STEP 2: PROCESS DATA")
+    logger.info("=" * 60)
+    
+    try:
+        # Initialize processor
+        processor = CMEMSDataProcessor(args.data_dir)
+        
+        # Find NetCDF files
+        nc_files = list(Path(args.data_dir).glob("*.nc"))
+        
+        if not nc_files:
+            logger.error(f"No NetCDF files found in {args.data_dir}")
+            return None
+        
+        # Load and process first file
+        dataset = processor.load_dataset(nc_files[0].name)
+        
+        # Create features
+        features_ds = processor.create_feature_dataset(dataset, target_var='pp')
+        
+        # Prepare ML data
+        X, y, feature_names = processor.prepare_ml_data(features_ds)
+        
+        logger.info(f"Processed data: X shape = {X.shape}, y shape = {y.shape}")
+        logger.info(f"Features: {feature_names}")
+        
+        # Save processed data
+        output_dir = Path(args.output_dir) / "processed"
+        processor.save_processed_data(features_ds, output_dir / "features.nc")
+        
+        processor.close()
+        
+        return {
+            'X': X,
+            'y': y,
+            'feature_names': feature_names,
+            'dataset': features_ds
+        }
         
     except Exception as e:
         logger.error(f"Data processing failed: {e}")
-        return False, None
+        if not args.continue_on_error:
+            raise
+        return None
 
-def run_uncertainty_analysis(dataset, config: dict) -> bool:
-    """Run uncertainty analysis"""
+def train_model_step(args, data, logger):
+    """Step 3: Train model"""
+    logger.info("=" * 60)
+    logger.info("STEP 3: TRAIN MODEL")
+    logger.info("=" * 60)
+    
+    if data is None:
+        logger.error("No data available for training")
+        return None
+    
     try:
-        logger.info("=" * 70)
-        logger.info("UNCERTAINTY ANALYSIS")
-        logger.info("=" * 70)
+        X = data['X']
+        y = data['y']
+        feature_names = data['feature_names']
         
-        analyzer = PrimaryProductivityUncertaintyAnalyzer(dataset, config)
-        results = analyzer.run_ensemble_analysis()
-        
-        # Save results
-        output_dir = Path("results/uncertainty_analysis")
-        analyzer.save_results(output_dir)
-        
-        # Create visualizations
-        plotter = EnvironmentalPlotter(style="publication")
-        
-        if 'spatial_uncertainty' in results:
-            fig = plotter.plot_uncertainty_decomposition(
-                results['spatial_uncertainty'],
-                save_path=output_dir / "uncertainty_decomposition.png"
-            )
-            plt.close(fig)
-        
-        logger.info("Uncertainty analysis completed successfully")
-        return True, results
-        
-    except Exception as e:
-        logger.error(f"Uncertainty analysis failed: {e}")
-        return False, None
-
-def run_oil_spill_simulation(dataset, config: dict, scenario: str = "test") -> bool:
-    """Run oil spill simulation"""
-    try:
-        logger.info("=" * 70)
-        logger.info("OIL SPILL SIMULATION")
-        logger.info("=" * 70)
-        
-        # Prepare current data
-        current_vars = ['uo', 'vo']
-        if all(var in dataset for var in current_vars):
-            current_data = dataset[current_vars]
-        else:
-            raise ValueError("Current data not found in dataset")
-        
-        # Create model
-        model = OilSpillModel(current_data, config.get('oil_spill', {}))
-        
-        # Define spill scenario
-        if scenario == "test":
-            spill = SpillEvent(
-                latitude=28.0,
-                longitude=-90.0,
-                start_time=datetime(2023, 6, 1),
-                duration_hours=24.0,
-                total_volume_m3=1000.0,
-                oil_type=OilType.MEDIUM_CRUDE
-            )
-        elif scenario == "deepwater_horizon":
-            spill = SpillEvent(
-                latitude=28.7366,
-                longitude=-88.3659,
-                start_time=datetime(2010, 4, 20, 22, 0),
-                duration_hours=87 * 24,
-                total_volume_m3=779000,
-                oil_type=OilType.MEDIUM_CRUDE,
-                release_depth_m=1500
-            )
-        else:
-            raise ValueError(f"Unknown scenario: {scenario}")
-        
-        # Add spill and run simulation
-        model.add_spill_event(spill)
-        trajectory_data = model.run_simulation()
-        
-        # Save results
-        output_dir = Path(f"results/oil_spill/{scenario}")
-        model.save_results(output_dir)
-        
-        # Create visualizations
-        plotter = EnvironmentalPlotter(style="publication")
-        
-        # Calculate concentration field
-        concentration_field = model.calculate_concentration_field()
-        
-        # Plot trajectory
-        fig = plotter.plot_oil_spill_trajectory(
-            trajectory_data,
-            concentration_field=concentration_field,
-            save_path=output_dir / "trajectory_plot.png"
-        )
-        plt.close(fig)
-        
-        logger.info(f"Oil spill simulation completed for scenario: {scenario}")
-        return True, trajectory_data
-        
-    except Exception as e:
-        logger.error(f"Oil spill simulation failed: {e}")
-        return False, None
-
-def create_dashboard(dataset, uncertainty_results=None, oil_spill_data=None):
-    """Create interactive dashboard"""
-    try:
-        logger.info("=" * 70)
-        logger.info("CREATING INTERACTIVE DASHBOARD")
-        logger.info("=" * 70)
-        
-        plotter = EnvironmentalPlotter(style="interactive")
-        
-        dashboard = plotter.create_interactive_dashboard(
-            dataset=dataset,
-            uncertainty_results=uncertainty_results,
-            oil_spill_data=oil_spill_data,
-            save_path="results/dashboard.html"
+        # Initialize model
+        model = RandomForestEnsemble(
+            n_models=10,
+            random_state=args.random_seed
         )
         
-        logger.info("Dashboard created successfully")
-        return True
+        # Initialize trainer
+        trainer = ModelTrainer(
+            output_dir=Path(args.output_dir) / "models",
+            random_state=args.random_seed
+        )
+        
+        # Train model
+        results = trainer.train_model(
+            model=model,
+            X_train=X,  # Using all data for training in this example
+            y_train=y,
+            X_val=None,  # No validation in simple pipeline
+            y_val=None,
+            feature_names=feature_names
+        )
+        
+        # Save model
+        model_path = Path(args.output_dir) / "models" / "random_forest"
+        model.save(model_path)
+        
+        logger.info(f"Model trained and saved to {model_path}")
+        
+        return results
         
     except Exception as e:
-        logger.error(f"Dashboard creation failed: {e}")
-        return False
+        logger.error(f"Model training failed: {e}")
+        if not args.continue_on_error:
+            raise
+        return None
+
+def evaluate_model_step(args, data, training_results, logger):
+    """Step 4: Evaluate model"""
+    logger.info("=" * 60)
+    logger.info("STEP 4: EVALUATE MODEL")
+    logger.info("=" * 60)
+    
+    if data is None or training_results is None:
+        logger.error("No data or model available for evaluation")
+        return None
+    
+    try:
+        # For simplicity, evaluate on training data
+        # In production, use separate test set
+        X = data['X']
+        y = data['y']
+        
+        # Load model
+        from src.models.ensemble import RandomForestEnsemble
+        model = RandomForestEnsemble()
+        model_path = Path(args.output_dir) / "models" / "random_forest"
+        model.load(model_path)
+        
+        # Make predictions
+        predictions, uncertainty = model.predict(X, return_uncertainty=True)
+        
+        # Evaluate
+        evaluator = ModelEvaluator()
+        metrics = evaluator.calculate_all_metrics(y, predictions, uncertainty)
+        
+        # Save evaluation results
+        eval_dir = Path(args.output_dir) / "evaluation"
+        eval_dir.mkdir(parents=True, exist_ok=True)
+        
+        import json
+        with open(eval_dir / "metrics.json", 'w') as f:
+            json.dump(metrics, f, indent=2)
+        
+        logger.info("Model evaluation completed:")
+        for metric, value in metrics.items():
+            if isinstance(value, (int, float)):
+                logger.info(f"  {metric}: {value:.4f}")
+        
+        return metrics
+        
+    except Exception as e:
+        logger.error(f"Model evaluation failed: {e}")
+        if not args.continue_on_error:
+            raise
+        return None
 
 def main():
     """Main pipeline function"""
-    parser = argparse.ArgumentParser(
-        description="Environmental Data Science Pipeline"
-    )
     
-    parser.add_argument(
-        "--mode",
-        choices=["all", "process", "analyze", "simulate", "dashboard"],
-        default="all",
-        help="Pipeline mode"
-    )
+    parser = argparse.ArgumentParser(description='Marine Productivity Prediction Pipeline')
     
-    parser.add_argument(
-        "--download-dir",
-        help="Directory containing downloaded CMEMS files"
-    )
-    
-    parser.add_argument(
-        "--scenario",
-        choices=["test", "deepwater_horizon"],
-        default="test",
-        help="Oil spill scenario"
-    )
-    
-    parser.add_argument(
-        "--config",
-        default="config/settings.yaml",
-        help="Configuration file path"
-    )
+    parser.add_argument('--data-dir', type=str, default='data/raw',
+                       help='Directory for input data')
+    parser.add_argument('--output-dir', type=str, default='results/pipeline',
+                       help='Directory for output results')
+    parser.add_argument('--random-seed', type=int, default=42,
+                       help='Random seed for reproducibility')
+    parser.add_argument('--skip-download', action='store_true',
+                       help='Skip download step')
+    parser.add_argument('--skip-training', action='store_true',
+                       help='Skip training step')
+    parser.add_argument('--continue-on-error', action='store_true',
+                       help='Continue pipeline even if a step fails')
+    parser.add_argument('--steps', type=str, nargs='+',
+                       choices=['download', 'process', 'train', 'evaluate', 'all'],
+                       default=['all'],
+                       help='Pipeline steps to run')
     
     args = parser.parse_args()
     
-    # Load configuration
-    config_loader = ConfigLoader(args.config)
-    config = config_loader.config
+    # Setup logger
+    logger = setup_pipeline_logger()
     
     logger.info("=" * 70)
-    logger.info("ENVIRONMENTAL DATA SCIENCE PIPELINE")
+    logger.info("MARINE PRODUCTIVITY PREDICTION PIPELINE")
     logger.info("=" * 70)
-    logger.info(f"Mode: {args.mode}")
-    logger.info(f"Scenario: {args.scenario}")
     
-    # Run pipeline components
-    success = True
-    dataset = None
-    uncertainty_results = None
-    oil_spill_data = None
+    # Create output directory
+    Path(args.output_dir).mkdir(parents=True, exist_ok=True)
     
-    # Data processing
-    if args.mode in ["all", "process"]:
-        process_success, dataset = run_data_processing(config, args.download_dir)
-        success = success and process_success
-    
-    # Uncertainty analysis
-    if args.mode in ["all", "analyze"] and success and dataset is not None:
-        analyze_success, uncertainty_results = run_uncertainty_analysis(dataset, config)
-        success = success and analyze_success
-    
-    # Oil spill simulation
-    if args.mode in ["all", "simulate"] and success and dataset is not None:
-        simulate_success, oil_spill_data = run_oil_spill_simulation(
-            dataset, config, args.scenario
-        )
-        success = success and simulate_success
-    
-    # Dashboard creation
-    if args.mode in ["all", "dashboard"] and success and dataset is not None:
-        dashboard_success = create_dashboard(
-            dataset, uncertainty_results, oil_spill_data
-        )
-        success = success and dashboard_success
-    
-    # Final status
-    logger.info("=" * 70)
-    if success:
-        logger.info("PIPELINE COMPLETED SUCCESSFULLY")
+    # Determine steps to run
+    if 'all' in args.steps:
+        steps_to_run = ['download', 'process', 'train', 'evaluate']
     else:
-        logger.error("PIPELINE FAILED")
-    logger.info("=" * 70)
+        steps_to_run = args.steps
     
-    return 0 if success else 1
+    # Run pipeline steps
+    download_results = None
+    processed_data = None
+    training_results = None
+    evaluation_results = None
+    
+    try:
+        # Step 1: Download
+        if 'download' in steps_to_run and not args.skip_download:
+            download_results = download_data_step(args, logger)
+        
+        # Step 2: Process
+        if 'process' in steps_to_run:
+            processed_data = process_data_step(args, logger)
+        
+        # Step 3: Train
+        if 'train' in steps_to_run and not args.skip_training:
+            training_results = train_model_step(args, processed_data, logger)
+        
+        # Step 4: Evaluate
+        if 'evaluate' in steps_to_run:
+            evaluation_results = evaluate_model_step(args, processed_data, training_results, logger)
+        
+        logger.info("=" * 70)
+        logger.info("PIPELINE COMPLETED SUCCESSFULLY")
+        logger.info("=" * 70)
+        
+        # Summary
+        logger.info("Pipeline Summary:")
+        if download_results:
+            logger.info(f"  Downloaded files: {len(download_results.get('downloaded_files', {}))}")
+        if processed_data:
+            logger.info(f"  Processed samples: {processed_data['X'].shape[0]}")
+        if training_results:
+            logger.info(f"  Model trained: {training_results.get('model_name', 'Unknown')}")
+        if evaluation_results:
+            logger.info(f"  Evaluation metrics calculated: {len(evaluation_results)}")
+        
+    except Exception as e:
+        logger.error(f"Pipeline failed: {e}")
+        sys.exit(1)
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()
