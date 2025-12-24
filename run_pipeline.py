@@ -20,7 +20,14 @@ from src.utils.config import ConfigManager, ExperimentConfig
 from src.data.downloader import MarineDataManager
 from src.data.loader import MarineDataLoader
 from src.data.preprocessor import DataPreprocessor
-from src.models.trainer import ModelTrainer
+# خط 23 - با try-except محافظت می‌کنیم
+try:
+    from src.models.trainer import ModelTrainer
+except ImportError as e:
+    print(f"Import error for ModelTrainer: {e}")
+    print("Note: You may need to download data first before training.")
+    # ModelTrainer را به None تنظیم می‌کنیم تا بعداً کنترل شود
+    ModelTrainer = None
 from src.evaluation.analyzer import ModelAnalyzer
 
 
@@ -255,8 +262,16 @@ class MarinePollutionPipeline:
             return
         
         try:
+            # Check if ModelTrainer is available
+            if ModelTrainer is None:
+                self.logger.main_logger.error(
+                    "ModelTrainer module not available. "
+                    "This may be because data hasn't been downloaded yet. "
+                    "Please run the download step first, or check if src/models/trainer.py exists."
+                )
+                return
+            
             # Initialize trainer
-            from src.models.trainer import ModelTrainer
             self.trainer = ModelTrainer(
                 config=self.config,
                 output_dir=self.config.output_dir / self.config.experiment_id
