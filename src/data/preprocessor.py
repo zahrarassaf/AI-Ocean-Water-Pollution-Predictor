@@ -10,7 +10,7 @@ import logging
 from scipy import stats
 from scipy.interpolate import griddata
 from scipy.signal import savgol_filter
-import bottleneck as bn
+pip install bottleneck
 
 from ..config.constants import DataConfig
 from ..utils.logger import setup_logger
