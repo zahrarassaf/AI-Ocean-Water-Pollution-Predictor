@@ -12,46 +12,25 @@ zarr>=2.10.0
 # Machine Learning
 torch>=1.10.0
 torchvision>=0.11.0
-pymc3>=3.11.4
-theano-pymc>=1.1.2
-gpytorch>=1.6.0
-botorch>=0.6.0
+# REMOVED: pymc3>=3.11.4 - causes compatibility issues
+# REMOVED: theano-pymc>=1.1.2 - causes installation errors
+
+# Google Drive integration
+gdown>=4.6.0
 
 # Visualization
 matplotlib>=3.5.0
 seaborn>=0.11.0
-plotly>=5.5.0
-bokeh>=2.4.0
-cartopy>=0.20.0
 
 # Utilities
 tqdm>=4.62.0
 joblib>=1.1.0
 pyyaml>=6.0
-python-dotenv>=0.19.0
+# REMOVED: python-dotenv>=0.19.0 - optional, removed to fix error
 colorlog>=6.6.0
 
 # Testing
 pytest>=6.2.5
-pytest-cov>=3.0.0
-hypothesis>=6.27.0
 
 # Documentation
 sphinx>=4.3.0
-numpydoc>=1.2.0
-
-# API
-fastapi>=0.70.0
-uvicorn>=0.16.0
-pydantic>=1.9.0
-
-# Development
-black>=21.12b0
-flake8>=4.0.0
-mypy>=0.931
-pre-commit>=2.17.0
-# Google Drive integration
-gdown>=4.6.0
-google-api-python-client>=2.80.0
-google-auth-httplib2>=0.1.0
-google-auth-oauthlib>=0.5.0
