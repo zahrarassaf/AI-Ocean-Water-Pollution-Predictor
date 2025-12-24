@@ -115,6 +115,12 @@ try:
     # Check MarineDataLoader methods
     loader_methods = [method for method in dir(MarineDataLoader) if not method.startswith('_')]
     print(f"DEBUG: MarineDataLoader methods: {loader_methods}")
+    
+    # Check load_marine_dataset signature
+    import inspect
+    if hasattr(MarineDataLoader, 'load_marine_dataset'):
+        sig = inspect.signature(MarineDataLoader.load_marine_dataset)
+        print(f"DEBUG: load_marine_dataset signature: {sig}")
 except ImportError as e:
     print(f"Warning: Data loader/preprocessor not available: {e}")
     available_modules['data_loader'] = False
@@ -355,6 +361,10 @@ class MarinePollutionPipeline:
             self.state['data_downloaded'] = True
             self._log_message("info", "Data download completed successfully")
             
+            # Get list of downloaded files
+            self.downloaded_files = list(self.config.data.raw_dir.glob("*.nc"))
+            self._log_message("info", f"Downloaded {len(self.downloaded_files)} NetCDF files")
+            
         except Exception as e:
             self._log_message("error", f"Data download failed: {e}")
             raise
@@ -372,43 +382,68 @@ class MarinePollutionPipeline:
             try:
                 self.data_loader = MarineDataLoader(config=self.config.data)
             except TypeError:
-                # Try with different parameters
                 try:
                     self.data_loader = MarineDataLoader()
                 except Exception as e:
                     self._log_message("error", f"Failed to initialize MarineDataLoader: {e}")
                     raise
             
-            # Load dataset - try different method names
-            dataset = None
-            method_tried = False
+            # Find downloaded files
+            data_dir = self.config.data.raw_dir
+            nc_files = list(data_dir.glob("*.nc"))
             
-            # Try load_marine_dataset method
-            if hasattr(self.data_loader, 'load_marine_dataset'):
-                self._log_message("info", "Using load_marine_dataset() method")
-                dataset = self.data_loader.load_marine_dataset()
-                method_tried = True
-            
-            # Try load_all_datasets method
-            if dataset is None and hasattr(self.data_loader, 'load_all_datasets'):
-                self._log_message("info", "Using load_all_datasets() method")
-                dataset = self.data_loader.load_all_datasets()
-                method_tried = True
-            
-            # Try load_data method
-            if dataset is None and hasattr(self.data_loader, 'load_data'):
-                self._log_message("info", "Using load_data() method")
-                dataset = self.data_loader.load_data()
-                method_tried = True
-            
-            if dataset is None:
-                if method_tried:
-                    self._log_message("error", "Data loading methods exist but returned None")
-                else:
-                    self._log_message("error", "No data loading method found on MarineDataLoader")
+            if not nc_files:
+                self._log_message("error", f"No NetCDF files found in {data_dir}")
                 return
             
-            self._log_message("info", f"Dataset loaded successfully: {type(dataset)}")
+            self._log_message("info", f"Found {len(nc_files)} NetCDF files: {[f.name for f in nc_files]}")
+            
+            # Load and process each file
+            all_datasets = []
+            for nc_file in nc_files:
+                try:
+                    self._log_message("info", f"Loading {nc_file.name}...")
+                    
+                    # Try different loading approaches
+                    if hasattr(self.data_loader, 'load_marine_dataset'):
+                        # Method requires filepath
+                        dataset = self.data_loader.load_marine_dataset(str(nc_file))
+                    elif hasattr(self.data_loader, 'load_multiple_datasets'):
+                        # Method might load multiple files
+                        dataset = self.data_loader.load_multiple_datasets([str(nc_file)])
+                    else:
+                        self._log_message("error", "No suitable loading method found")
+                        return
+                    
+                    if dataset is not None:
+                        all_datasets.append(dataset)
+                        self._log_message("info", f"✓ Loaded {nc_file.name}")
+                    else:
+                        self._log_message("warning", f"Failed to load {nc_file.name}")
+                        
+                except Exception as e:
+                    self._log_message("warning", f"Error loading {nc_file.name}: {e}")
+                    continue
+            
+            if not all_datasets:
+                self._log_message("error", "No datasets were successfully loaded")
+                return
+            
+            self._log_message("info", f"Successfully loaded {len(all_datasets)} datasets")
+            
+            # Combine datasets if needed
+            if len(all_datasets) == 1:
+                combined_dataset = all_datasets[0]
+            else:
+                # Try to combine datasets
+                try:
+                    import xarray as xr
+                    combined_dataset = xr.merge(all_datasets, compat='override')
+                    self._log_message("info", "Merged multiple datasets")
+                except Exception as e:
+                    self._log_message("warning", f"Could not merge datasets: {e}")
+                    # Use first dataset as fallback
+                    combined_dataset = all_datasets[0]
             
             # Initialize DataPreprocessor
             try:
@@ -417,7 +452,7 @@ class MarinePollutionPipeline:
                 self.preprocessor = DataPreprocessor()
             
             # Process data
-            processed_data = self.preprocessor.process(dataset)
+            processed_data = self.preprocessor.process(combined_dataset)
             
             # Prepare features and target
             X, y, feature_names = self.preprocessor.prepare_features(
@@ -425,6 +460,8 @@ class MarinePollutionPipeline:
                 target_var=self.config.data.target_variable,
                 feature_vars=self.config.data.feature_variables
             )
+            
+            self._log_message("info", f"Prepared data: X shape={X.shape}, y shape={y.shape}")
             
             # Check if splitter is available
             if available_modules['splitter']:
