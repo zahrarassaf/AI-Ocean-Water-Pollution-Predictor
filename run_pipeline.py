@@ -112,11 +112,9 @@ try:
     from src.data.preprocessor import DataPreprocessor
     available_modules['data_loader'] = True
     
-    # Check MarineDataLoader constructor signature
-    import inspect
-    loader_signature = inspect.signature(MarineDataLoader.__init__)
-    loader_params = list(loader_signature.parameters.keys())
-    print(f"DEBUG: MarineDataLoader parameters: {loader_params}")
+    # Check MarineDataLoader methods
+    loader_methods = [method for method in dir(MarineDataLoader) if not method.startswith('_')]
+    print(f"DEBUG: MarineDataLoader methods: {loader_methods}")
 except ImportError as e:
     print(f"Warning: Data loader/preprocessor not available: {e}")
     available_modules['data_loader'] = False
@@ -370,25 +368,49 @@ class MarinePollutionPipeline:
             return
         
         try:
-            # Try different constructor signatures for MarineDataLoader
+            # Initialize MarineDataLoader
             try:
-                # Try with data_dir parameter first
-                self.data_loader = MarineDataLoader(
-                    data_dir=self.config.data.raw_dir,
-                    config=self.config.data
-                )
+                self.data_loader = MarineDataLoader(config=self.config.data)
             except TypeError:
-                # Try with just config parameter
+                # Try with different parameters
                 try:
-                    self.data_loader = MarineDataLoader(config=self.config.data)
-                except TypeError:
-                    # Try default constructor
                     self.data_loader = MarineDataLoader()
+                except Exception as e:
+                    self._log_message("error", f"Failed to initialize MarineDataLoader: {e}")
+                    raise
             
-            # Load all NetCDF files
-            dataset = self.data_loader.load_all_datasets()
+            # Load dataset - try different method names
+            dataset = None
+            method_tried = False
             
-            # Try different constructor signatures for DataPreprocessor
+            # Try load_marine_dataset method
+            if hasattr(self.data_loader, 'load_marine_dataset'):
+                self._log_message("info", "Using load_marine_dataset() method")
+                dataset = self.data_loader.load_marine_dataset()
+                method_tried = True
+            
+            # Try load_all_datasets method
+            if dataset is None and hasattr(self.data_loader, 'load_all_datasets'):
+                self._log_message("info", "Using load_all_datasets() method")
+                dataset = self.data_loader.load_all_datasets()
+                method_tried = True
+            
+            # Try load_data method
+            if dataset is None and hasattr(self.data_loader, 'load_data'):
+                self._log_message("info", "Using load_data() method")
+                dataset = self.data_loader.load_data()
+                method_tried = True
+            
+            if dataset is None:
+                if method_tried:
+                    self._log_message("error", "Data loading methods exist but returned None")
+                else:
+                    self._log_message("error", "No data loading method found on MarineDataLoader")
+                return
+            
+            self._log_message("info", f"Dataset loaded successfully: {type(dataset)}")
+            
+            # Initialize DataPreprocessor
             try:
                 self.preprocessor = DataPreprocessor(config=self.config.data)
             except TypeError:
