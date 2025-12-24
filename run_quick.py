@@ -13,14 +13,18 @@ def run_command(cmd, description):
     print(f"{'='*60}")
     print(f"Running: {cmd}")
     
-    result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+    result = subprocess.run(cmd, shell=True, capture_output=True, text=True, encoding='utf-8')
     
     if result.returncode == 0:
-        print("✓ Success")
+        print("[SUCCESS]")
         if result.stdout:
-            print(f"Output: {result.stdout[:500]}...")
+            # Print only first 500 chars
+            output_preview = result.stdout[:500]
+            if len(result.stdout) > 500:
+                output_preview += "..."
+            print(f"Output: {output_preview}")
     else:
-        print("✗ Failed")
+        print("[FAILED]")
         print(f"Error: {result.stderr}")
         return False
     
@@ -30,9 +34,9 @@ def main():
     print("Marine Productivity Predictor - Quick Start")
     print("=" * 60)
     
-    # 1. Install minimal requirements
+    # 1. Install minimal requirements (including bottleneck)
     if not run_command(
-        "pip install numpy pandas scikit-learn xarray netcdf4 gdown",
+        "pip install numpy pandas scikit-learn xarray netcdf4 gdown bottleneck",
         "1. Installing core dependencies"
     ):
         return
@@ -41,17 +45,17 @@ def main():
     dirs = ["data/raw", "data/processed", "models", "results", "logs"]
     for dir_path in dirs:
         os.makedirs(dir_path, exist_ok=True)
-    print("\n✓ Created directory structure")
+    print("\n[SUCCESS] Created directory structure")
     
     # 3. Run simplified download
     print("\n" + "="*60)
     print("2. Downloading test data")
     print("="*60)
     
-    # Create simple download script
-    download_script = """
-import gdown
+    # Create simple download script with ASCII characters only
+    download_script = '''import gdown
 import os
+from pathlib import Path
 
 urls = [
     "https://drive.google.com/file/d/17YEvHDE9DmtLsXKDGYwrGD8OE46swNDc/view?usp=sharing",
@@ -62,25 +66,51 @@ urls = [
 
 filenames = ["chlorophyll.nc", "light_attenuation.nc", "water_clarity.nc", "productivity.nc"]
 
-for url, filename in zip(urls, filenames):
-    print(f"Downloading {filename}...")
+print("Starting download...")
+for i, (url, filename) in enumerate(zip(urls, filenames)):
+    print(f"Downloading file {i+1}/{len(urls)}: {filename}")
+    
     try:
         # Extract file ID
         file_id = url.split('/d/')[1].split('/')[0]
-        gdown.download(f"https://drive.google.com/uc?id={file_id}", f"data/raw/{filename}", quiet=False)
-        print(f"✓ Downloaded {filename}")
+        output_path = f"data/raw/{filename}"
+        
+        gdown.download(
+            f"https://drive.google.com/uc?id={file_id}",
+            output_path,
+            quiet=False
+        )
+        
+        # Check if file was downloaded
+        if Path(output_path).exists():
+            size_mb = Path(output_path).stat().st_size / (1024 * 1024)
+            print(f"[SUCCESS] Downloaded: {filename} ({size_mb:.1f} MB)")
+        else:
+            print(f"[FAILED] File not created: {filename}")
+            
     except Exception as e:
-        print(f"✗ Failed to download {filename}: {e}")
-"""
+        print(f"[ERROR] Failed to download {filename}: {e}")
+
+print("\\nDownload process completed.")'''
     
-    with open("quick_download.py", "w") as f:
-        f.write(download_script)
+    # Write download script with explicit encoding
+    try:
+        with open("quick_download.py", "w", encoding="utf-8") as f:
+            f.write(download_script)
+    except Exception as e:
+        print(f"[ERROR] Could not create download script: {e}")
+        return
     
-    run_command("python quick_download.py", "Downloading data")
+    # Run the download script
+    if not run_command("python quick_download.py", "Downloading data"):
+        print("[WARNING] Download had issues, but continuing...")
     
     # 4. Clean up
     if os.path.exists("quick_download.py"):
-        os.remove("quick_download.py")
+        try:
+            os.remove("quick_download.py")
+        except:
+            pass
     
     print("\n" + "="*60)
     print("QUICK START COMPLETED")
