@@ -76,8 +76,10 @@ except ImportError as e:
                 def __init__(self):
                     self.raw_dir = Path("data/raw")
                     self.processed_dir = Path("data/processed")
-                    self.target_variable = "chlorophyll_concentration"
-                    self.feature_variables = ["diffuse_attenuation", "primary_productivity", "secchi_depth"]
+                    # Use actual variable names from the datasets
+                    self.target_variable = "KD490"  # From chlorophyll_concentration.nc
+                    # Select some key variables from other datasets
+                    self.feature_variables = ["CHL", "PP", "CDM"]  # From other datasets
                     self.source = type('obj', (object,), {'value': 'local'})()
             
             class ModelConfig:
@@ -124,103 +126,165 @@ except ImportError as e:
     print(f"Warning: Data loader not available: {e}")
     available_modules['data_loader'] = False
 
-# Try to import original preprocessor
-try:
-    from src.data.preprocessor import DataPreprocessor
-    available_modules['preprocessor'] = True
-    print("INFO: Using original DataPreprocessor")
-except ImportError as e:
-    print(f"Warning: Original DataPreprocessor not available: {e}")
-    available_modules['preprocessor'] = False
-
-# Import simple preprocessor as fallback
-try:
-    # First try to import the simple version we just created
-    from src.data.simple_preprocessor import SimpleDataPreprocessor
-    available_modules['simple_preprocessor'] = True
-    print("INFO: Using SimpleDataPreprocessor")
-except ImportError:
-    # Create inline simple preprocessor
-    print("INFO: Creating inline SimpleDataPreprocessor")
-    class SimpleDataPreprocessor:
-        def __init__(self, config=None):
-            self.config = config or {}
-            import numpy as np
+# Create a simple preprocessor inline
+class SimpleDataPreprocessor:
+    """A simple preprocessor that works with the actual data structure."""
+    
+    def __init__(self, config=None):
+        self.config = config or {}
+        print(f"SimpleDataPreprocessor initialized with config: {config}")
+    
+    def process(self, dataset):
+        """Process xarray dataset to prepare for ML."""
+        print(f"Processing dataset with variables: {list(dataset.data_vars)}")
         
-        def process(self, dataset):
-            """Basic processing of xarray dataset."""
-            print(f"DEBUG: Processing dataset with {len(dataset.data_vars)} variables")
+        # Check if dataset is empty
+        if len(dataset.data_vars) == 0:
+            raise ValueError("Dataset has no variables")
+        
+        # Convert to pandas DataFrame for easier manipulation
+        try:
+            # Try to convert to DataFrame
+            df = dataset.to_dataframe().reset_index()
+            print(f"Converted to DataFrame with shape: {df.shape}")
             
-            # Simple processing: convert to numpy array
-            data_arrays = []
-            feature_names = []
+            # Drop columns with too many NaNs
+            df = df.dropna(axis=1, how='all')
             
-            for var_name, var_data in dataset.data_vars.items():
-                # Flatten the data
-                flat_data = var_data.values.flatten()
-                data_arrays.append(flat_data)
-                feature_names.append(var_name)
+            # Drop rows with any NaN
+            df_clean = df.dropna()
+            print(f"After dropping NaNs: {df_clean.shape}")
             
-            # Stack arrays
-            import numpy as np
-            X = np.column_stack(data_arrays)
+            # Separate coordinates and data
+            coord_cols = ['time', 'lat', 'lon', 'sample'] if 'sample' in df_clean.columns else ['time', 'lat', 'lon']
+            data_cols = [col for col in df_clean.columns if col not in coord_cols]
             
-            # Remove rows with NaN
-            valid_mask = ~np.any(np.isnan(X), axis=1)
-            X = X[valid_mask]
+            if not data_cols:
+                raise ValueError("No data columns found after cleaning")
+            
+            print(f"Data columns: {data_cols}")
+            
+            # Extract features
+            X = df_clean[data_cols].values
+            feature_names = data_cols
             
             return {
                 'X': X,
                 'feature_names': feature_names,
-                'valid_mask': valid_mask
+                'df': df_clean,
+                'data_columns': data_cols,
+                'coord_columns': coord_cols
             }
-        
-        def prepare_features(self, processed_data, target_var=None, feature_vars=None):
-            """Prepare features and target."""
-            X = processed_data['X']
-            feature_names = processed_data['feature_names']
             
-            # Default target is first variable
-            if target_var is None:
-                target_var = feature_names[0]
-            
-            # Default features are all except target
-            if feature_vars is None:
-                feature_vars = [f for f in feature_names if f != target_var]
-            
-            # Find indices
-            try:
-                target_idx = feature_names.index(target_var)
-            except ValueError:
-                print(f"Warning: Target '{target_var}' not found, using first variable")
-                target_idx = 0
-                target_var = feature_names[0]
-            
-            feature_indices = []
-            selected_features = []
-            for f in feature_vars:
-                try:
-                    idx = feature_names.index(f)
-                    feature_indices.append(idx)
-                    selected_features.append(f)
-                except ValueError:
-                    print(f"Warning: Feature '{f}' not found")
-            
-            if not feature_indices:
-                # Use all other variables as features
-                feature_indices = [i for i in range(len(feature_names)) if i != target_idx]
-                selected_features = [feature_names[i] for i in feature_indices]
-            
-            # Split data
-            y = X[:, target_idx]
-            X_features = X[:, feature_indices]
-            
-            print(f"DEBUG: Final features: {selected_features}, target: {target_var}")
-            print(f"DEBUG: X shape: {X_features.shape}, y shape: {y.shape}")
-            
-            return X_features, y, selected_features
+        except Exception as e:
+            print(f"Error converting to DataFrame: {e}")
+            # Fallback: simple flattening
+            return self._simple_process(dataset)
     
-    available_modules['simple_preprocessor'] = True
+    def _simple_process(self, dataset):
+        """Simple processing as fallback."""
+        print("Using simple processing fallback")
+        
+        # Get all variable names
+        all_vars = list(dataset.data_vars)
+        print(f"All variables: {all_vars}")
+        
+        # Collect data from each variable
+        data_arrays = []
+        valid_vars = []
+        
+        for var_name in all_vars:
+            try:
+                var_data = dataset[var_name]
+                # Flatten the data
+                flat_data = var_data.values.flatten()
+                if flat_data.size > 0:
+                    data_arrays.append(flat_data)
+                    valid_vars.append(var_name)
+                    print(f"  Added {var_name}: shape={flat_data.shape}")
+            except Exception as e:
+                print(f"  Skipping {var_name}: {e}")
+        
+        if not data_arrays:
+            raise ValueError("No valid data found in any variable")
+        
+        # Make sure all arrays have the same length
+        min_length = min(arr.shape[0] for arr in data_arrays)
+        data_arrays = [arr[:min_length] for arr in data_arrays]
+        
+        # Stack arrays
+        import numpy as np
+        X = np.column_stack(data_arrays)
+        
+        # Remove rows with NaN
+        valid_mask = ~np.any(np.isnan(X), axis=1)
+        X = X[valid_mask]
+        
+        print(f"Final X shape: {X.shape}, Features: {valid_vars}")
+        
+        return {
+            'X': X,
+            'feature_names': valid_vars,
+            'valid_mask': valid_mask
+        }
+    
+    def prepare_features(self, processed_data, target_var=None, feature_vars=None):
+        """Prepare features and target for ML."""
+        X = processed_data['X']
+        feature_names = processed_data['feature_names']
+        
+        print(f"Preparing features from: {feature_names}")
+        print(f"Target variable requested: {target_var}")
+        print(f"Feature variables requested: {feature_vars}")
+        
+        # If no target specified, use KD490 if available, otherwise first variable
+        if target_var is None:
+            if 'KD490' in feature_names:
+                target_var = 'KD490'
+            else:
+                target_var = feature_names[0]
+        
+        # If no features specified, use all except target
+        if feature_vars is None:
+            feature_vars = [f for f in feature_names if f != target_var]
+        
+        # Find target index
+        try:
+            target_idx = feature_names.index(target_var)
+            print(f"Target '{target_var}' found at index {target_idx}")
+        except ValueError:
+            print(f"Warning: Target '{target_var}' not found, using first variable")
+            target_idx = 0
+            target_var = feature_names[0]
+        
+        # Find feature indices
+        feature_indices = []
+        selected_features = []
+        for f in feature_vars:
+            try:
+                idx = feature_names.index(f)
+                feature_indices.append(idx)
+                selected_features.append(f)
+                print(f"  Feature '{f}' found at index {idx}")
+            except ValueError:
+                print(f"  Warning: Feature '{f}' not found")
+        
+        # If no features selected, use all other variables
+        if not feature_indices:
+            feature_indices = [i for i in range(len(feature_names)) if i != target_idx]
+            selected_features = [feature_names[i] for i in feature_indices]
+            print(f"Using all other variables as features: {selected_features}")
+        
+        # Split data
+        y = X[:, target_idx]
+        X_features = X[:, feature_indices]
+        
+        print(f"Final - Features: {selected_features}, Target: {target_var}")
+        print(f"Final - X shape: {X_features.shape}, y shape: {y.shape}")
+        
+        return X_features, y, selected_features
+
+available_modules['simple_preprocessor'] = True
 
 # Try to import splitter
 try:
@@ -361,7 +425,7 @@ class MarinePollutionPipeline:
         # Initialize components
         self.data_manager = None
         self.data_loader = None
-        self.preprocessor = None
+        self.preprocessor = SimpleDataPreprocessor(config.data)  # Always use simple preprocessor
         self.trainer = None
         self.analyzer = None
         
@@ -501,12 +565,20 @@ class MarinePollutionPipeline:
                 try:
                     self._log_message("info", f"Loading {nc_file.name}...")
                     
-                    # Load dataset
-                    dataset = self.data_loader.load_marine_dataset(str(nc_file))
+                    # Load dataset with specific variables if needed
+                    if "chlorophyll" in nc_file.name.lower():
+                        # Load chlorophyll dataset (has KD490 variable)
+                        dataset = self.data_loader.load_marine_dataset(str(nc_file))
+                    else:
+                        # Load other datasets with all variables
+                        dataset = self.data_loader.load_marine_dataset(str(nc_file))
                     
                     if dataset is not None:
                         all_datasets.append(dataset)
-                        self._log_message("info", f"✓ Loaded {nc_file.name} with variables: {list(dataset.data_vars)}")
+                        vars_list = list(dataset.data_vars)
+                        self._log_message("info", f"✓ Loaded {nc_file.name} with {len(vars_list)} variables")
+                        if len(vars_list) <= 10:  # Don't spam if too many variables
+                            self._log_message("info", f"  Variables: {vars_list}")
                     else:
                         self._log_message("warning", f"Failed to load {nc_file.name}")
                         
@@ -529,24 +601,14 @@ class MarinePollutionPipeline:
                     import xarray as xr
                     combined_dataset = xr.merge(all_datasets, compat='override')
                     self._log_message("info", "Merged multiple datasets")
+                    self._log_message("info", f"Merged dataset variables: {list(combined_dataset.data_vars)}")
                 except Exception as e:
                     self._log_message("warning", f"Could not merge datasets: {e}")
                     # Use first dataset as fallback
                     combined_dataset = all_datasets[0]
             
-            # Initialize preprocessor
-            if available_modules['preprocessor']:
-                try:
-                    self.preprocessor = DataPreprocessor(config=self.config.data)
-                    self._log_message("info", "Using original DataPreprocessor")
-                except Exception as e:
-                    self._log_message("warning", f"Failed to initialize original preprocessor: {e}")
-                    self.preprocessor = SimpleDataPreprocessor(self.config.data)
-            else:
-                self.preprocessor = SimpleDataPreprocessor(self.config.data)
-                self._log_message("info", "Using SimpleDataPreprocessor")
-            
             # Process data
+            self._log_message("info", "Processing combined dataset...")
             processed_data = self.preprocessor.process(combined_dataset)
             
             # Prepare features and target
@@ -586,18 +648,25 @@ class MarinePollutionPipeline:
             output_dir.mkdir(parents=True, exist_ok=True)
             
             import joblib
-            joblib.dump({
+            data_to_save = {
                 'X_train': splits['X_train'],
                 'X_val': splits['X_val'],
                 'X_test': splits['X_test'],
                 'y_train': splits['y_train'],
                 'y_val': splits['y_val'],
                 'y_test': splits['y_test'],
-                'feature_names': feature_names
-            }, output_dir / "processed_data.joblib")
+                'feature_names': feature_names,
+                'config': {
+                    'target_variable': self.config.data.target_variable,
+                    'feature_variables': self.config.data.feature_variables
+                }
+            }
+            
+            joblib.dump(data_to_save, output_dir / "processed_data.joblib")
             
             self.state['data_processed'] = True
             self._log_message("info", f"Data processing completed. Features: {len(feature_names)}")
+            self._log_message("info", f"Processed data saved to: {output_dir / 'processed_data.joblib'}")
             
             # Store processed data for next steps
             self.processed_data = {
@@ -608,6 +677,8 @@ class MarinePollutionPipeline:
             
         except Exception as e:
             self._log_message("error", f"Data processing failed: {e}")
+            import traceback
+            traceback.print_exc()
             raise
     
     def _train_model(self):
