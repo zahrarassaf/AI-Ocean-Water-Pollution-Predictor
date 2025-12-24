@@ -34,16 +34,16 @@ except ImportError as e:
             self.data_logger = self
             self.metrics_logger = self
         
-        def info(self, msg):
+        def info(self, msg, *args, **kwargs):
             print(f"INFO: {msg}")
         
-        def warning(self, msg):
+        def warning(self, msg, *args, **kwargs):
             print(f"WARNING: {msg}")
         
-        def error(self, msg):
+        def error(self, msg, *args, **kwargs):
             print(f"ERROR: {msg}")
         
-        def debug(self, msg):
+        def debug(self, msg, *args, **kwargs):
             print(f"DEBUG: {msg}")
         
         def log_config(self, config):
@@ -164,8 +164,22 @@ class PipelineController:
                 else:
                     init_experiment_logger(experiment_id=config.experiment_id)
                 self.logger = get_experiment_logger()
+            
+            # Check logger interface and create wrapper if needed
+            if hasattr(self.logger, 'main_logger'):
+                # Logger has sub-loggers
+                self._logger_wrapper = self.logger
+                self.logger = self.logger.main_logger
+            else:
+                # Create wrapper for consistent interface
+                self._logger_wrapper = type('obj', (object,), {
+                    'main_logger': self.logger,
+                    'data_logger': self.logger,
+                    'metrics_logger': self.logger
+                })()
         else:
             self.logger = MinimalLogger()
+            self._logger_wrapper = self.logger
         
         self.is_running = True
         
@@ -175,12 +189,15 @@ class PipelineController:
     
     def _signal_handler(self, signum, frame):
         """Handle shutdown signals."""
-        self.logger.warning(f"Received signal {signum}, initiating graceful shutdown...")
+        if hasattr(self.logger, 'warning'):
+            self.logger.warning(f"Received signal {signum}, initiating graceful shutdown...")
+        else:
+            print(f"WARNING: Received signal {signum}, initiating graceful shutdown...")
         self.is_running = False
     
     def check_health(self) -> bool:
         """Check system health and dependencies."""
-        self.logger.info("Performing system health check...")
+        self._log_message("info", "Performing system health check...")
         
         checks = []
         
@@ -209,14 +226,21 @@ class PipelineController:
         all_passed = True
         for name, actual, required, passed in checks:
             status = "PASS" if passed else "FAIL"
-            self.logger.info(f"  {name}: {actual} (required: {required}) [{status}]")
+            self._log_message("info", f"  {name}: {actual} (required: {required}) [{status}]")
             if not passed:
                 all_passed = False
         
         if not all_passed:
-            self.logger.warning("Some health checks failed. Pipeline may not run optimally.")
+            self._log_message("warning", "Some health checks failed. Pipeline may not run optimally.")
         
         return all_passed
+    
+    def _log_message(self, level, msg):
+        """Universal logging method that works with any logger interface."""
+        if hasattr(self.logger, level):
+            getattr(self.logger, level)(msg)
+        else:
+            print(f"{level.upper()}: {msg}")
 
 
 class MarinePollutionPipeline:
@@ -246,11 +270,11 @@ class MarinePollutionPipeline:
     def run(self, steps: Optional[list] = None):
         """Run the complete pipeline or specific steps."""
         try:
-            self.logger.info("=" * 80)
-            self.logger.info("MARINE POLLUTION PREDICTION PIPELINE")
-            self.logger.info("=" * 80)
-            self.logger.info(f"Experiment ID: {self.config.experiment_id}")
-            self.logger.info(f"Start time: {datetime.now().isoformat()}")
+            self._log_message("info", "=" * 80)
+            self._log_message("info", "MARINE POLLUTION PREDICTION PIPELINE")
+            self._log_message("info", "=" * 80)
+            self._log_message("info", f"Experiment ID: {self.config.experiment_id}")
+            self._log_message("info", f"Start time: {datetime.now().isoformat()}")
             
             # Perform health check
             self.controller.check_health()
@@ -263,21 +287,21 @@ class MarinePollutionPipeline:
             available_steps = []
             for step in steps:
                 if step == 'download' and not available_modules['downloader']:
-                    self.logger.warning("Download step skipped - downloader module not available")
+                    self._log_message("warning", "Download step skipped - downloader module not available")
                 elif step == 'process' and not available_modules['data_loader']:
-                    self.logger.warning("Process step skipped - data loader/preprocessor modules not available")
+                    self._log_message("warning", "Process step skipped - data loader/preprocessor modules not available")
                 elif step == 'train' and not available_modules['trainer']:
-                    self.logger.warning("Train step skipped - trainer module not available")
+                    self._log_message("warning", "Train step skipped - trainer module not available")
                 elif step == 'evaluate' and not available_modules['analyzer']:
-                    self.logger.warning("Evaluate step skipped - analyzer module not available")
+                    self._log_message("warning", "Evaluate step skipped - analyzer module not available")
                 else:
                     available_steps.append(step)
             
             if not available_steps:
-                self.logger.error("No available steps to execute. Check module availability.")
+                self._log_message("error", "No available steps to execute. Check module availability.")
                 return
             
-            self.logger.info(f"Pipeline steps to execute: {', '.join(available_steps)}")
+            self._log_message("info", f"Pipeline steps to execute: {', '.join(available_steps)}")
             
             # Execute pipeline steps
             pipeline_steps = {
@@ -290,31 +314,31 @@ class MarinePollutionPipeline:
             for step_name in available_steps:
                 if step_name in pipeline_steps:
                     if not self.controller.is_running:
-                        self.logger.warning("Pipeline interrupted by user")
+                        self._log_message("warning", "Pipeline interrupted by user")
                         break
                     
-                    self.logger.info(f"Executing step: {step_name}")
+                    self._log_message("info", f"Executing step: {step_name}")
                     pipeline_steps[step_name]()
                 else:
-                    self.logger.warning(f"Unknown pipeline step: {step_name}")
+                    self._log_message("warning", f"Unknown pipeline step: {step_name}")
             
             # Generate final report
             self._generate_report()
             
-            self.logger.info("Pipeline execution completed successfully")
+            self._log_message("info", "Pipeline execution completed successfully")
             
         except Exception as e:
-            self.logger.error(f"Pipeline failed: {e}")
+            self._log_message("error", f"Pipeline failed: {e}")
             import traceback
             traceback.print_exc()
             raise
     
     def _download_data(self):
         """Download marine data from Google Drive."""
-        self.logger.info("Step 1: Downloading marine data")
+        self._log_message("info", "Step 1: Downloading marine data")
         
         if not available_modules['downloader']:
-            self.logger.error("Downloader module not available. Cannot download data.")
+            self._log_message("error", "Downloader module not available. Cannot download data.")
             return
         
         try:
@@ -325,18 +349,18 @@ class MarinePollutionPipeline:
             )
             
             self.state['data_downloaded'] = True
-            self.logger.info("Data download completed successfully")
+            self._log_message("info", "Data download completed successfully")
             
         except Exception as e:
-            self.logger.error(f"Data download failed: {e}")
+            self._log_message("error", f"Data download failed: {e}")
             raise
     
     def _process_data(self):
         """Process and prepare data for modeling."""
-        self.logger.info("Step 2: Processing marine data")
+        self._log_message("info", "Step 2: Processing marine data")
         
         if not available_modules['data_loader']:
-            self.logger.error("Data loader/preprocessor modules not available. Cannot process data.")
+            self._log_message("error", "Data loader/preprocessor modules not available. Cannot process data.")
             return
         
         try:
@@ -399,7 +423,7 @@ class MarinePollutionPipeline:
             }, output_dir / "processed_data.joblib")
             
             self.state['data_processed'] = True
-            self.logger.info(f"Data processing completed. Features: {len(feature_names)}")
+            self._log_message("info", f"Data processing completed. Features: {len(feature_names)}")
             
             # Store processed data for next steps
             self.processed_data = {
@@ -409,19 +433,19 @@ class MarinePollutionPipeline:
             }
             
         except Exception as e:
-            self.logger.error(f"Data processing failed: {e}")
+            self._log_message("error", f"Data processing failed: {e}")
             raise
     
     def _train_model(self):
         """Train machine learning model."""
-        self.logger.info("Step 3: Training prediction model")
+        self._log_message("info", "Step 3: Training prediction model")
         
         if not self.state['data_processed']:
-            self.logger.error("Data not processed. Run process step first.")
+            self._log_message("error", "Data not processed. Run process step first.")
             return
         
         if not available_modules['trainer']:
-            self.logger.error("ModelTrainer module not available. Cannot train model.")
+            self._log_message("error", "ModelTrainer module not available. Cannot train model.")
             return
         
         try:
@@ -444,25 +468,25 @@ class MarinePollutionPipeline:
             )
             
             self.state['model_trained'] = True
-            self.logger.info("Model training completed successfully")
+            self._log_message("info", "Model training completed successfully")
             
             # Store trainer for evaluation
             self.training_results = training_results
             
         except Exception as e:
-            self.logger.error(f"Model training failed: {e}")
+            self._log_message("error", f"Model training failed: {e}")
             raise
     
     def _evaluate_model(self):
         """Evaluate trained model."""
-        self.logger.info("Step 4: Evaluating model performance")
+        self._log_message("info", "Step 4: Evaluating model performance")
         
         if not self.state['model_trained']:
-            self.logger.error("Model not trained. Run train step first.")
+            self._log_message("error", "Model not trained. Run train step first.")
             return
         
         if not available_modules['analyzer']:
-            self.logger.error("ModelAnalyzer module not available. Cannot evaluate model.")
+            self._log_message("error", "ModelAnalyzer module not available. Cannot evaluate model.")
             return
         
         try:
@@ -488,15 +512,15 @@ class MarinePollutionPipeline:
             )
             
             self.state['model_evaluated'] = True
-            self.logger.info("Model evaluation completed")
+            self._log_message("info", "Model evaluation completed")
             
         except Exception as e:
-            self.logger.error(f"Model evaluation failed: {e}")
+            self._log_message("error", f"Model evaluation failed: {e}")
             raise
     
     def _generate_report(self):
         """Generate final pipeline report."""
-        self.logger.info("Generating final pipeline report...")
+        self._log_message("info", "Generating final pipeline report...")
         
         report = {
             'experiment_id': self.config.experiment_id,
@@ -514,7 +538,14 @@ class MarinePollutionPipeline:
         with open(report_file, 'w') as f:
             json.dump(report, f, indent=2, default=str)
         
-        self.logger.info(f"Pipeline report saved to: {report_file}")
+        self._log_message("info", f"Pipeline report saved to: {report_file}")
+    
+    def _log_message(self, level, msg):
+        """Universal logging method that works with any logger interface."""
+        if hasattr(self.logger, level):
+            getattr(self.logger, level)(msg)
+        else:
+            print(f"{level.upper()}: {msg}")
 
 
 def main():
