@@ -110,11 +110,18 @@ except ImportError as e:
 try:
     from src.data.loader import MarineDataLoader
     from src.data.preprocessor import DataPreprocessor
-    from src.data.splitter import DataSplitter
-    available_modules['data_processing'] = True
+    available_modules['data_loader'] = True
 except ImportError as e:
-    print(f"Warning: Data processing modules not available: {e}")
-    available_modules['data_processing'] = False
+    print(f"Warning: Data loader/preprocessor not available: {e}")
+    available_modules['data_loader'] = False
+
+# Try to import splitter
+try:
+    from src.data.splitter import DataSplitter
+    available_modules['splitter'] = True
+except ImportError as e:
+    print(f"Warning: DataSplitter module not available: {e}")
+    available_modules['splitter'] = False
 
 # Try to import trainer
 try:
@@ -138,9 +145,28 @@ except ImportError as e:
 class PipelineController:
     """Control and monitor pipeline execution."""
     
-    def __init__(self, config):
+    def __init__(self, config, log_dir=None):
         self.config = config
-        self.logger = get_experiment_logger() if available_modules['logger'] else MinimalLogger()
+        self.log_dir = log_dir
+        
+        # Initialize logger
+        if available_modules['logger']:
+            try:
+                # Try to get existing logger
+                self.logger = get_experiment_logger()
+            except RuntimeError:
+                # Initialize logger if not already initialized
+                if log_dir:
+                    init_experiment_logger(
+                        experiment_id=config.experiment_id,
+                        log_dir=log_dir
+                    )
+                else:
+                    init_experiment_logger(experiment_id=config.experiment_id)
+                self.logger = get_experiment_logger()
+        else:
+            self.logger = MinimalLogger()
+        
         self.is_running = True
         
         # Setup signal handlers for graceful shutdown
@@ -196,9 +222,9 @@ class PipelineController:
 class MarinePollutionPipeline:
     """Main pipeline for marine pollution prediction."""
     
-    def __init__(self, config):
+    def __init__(self, config, log_dir=None):
         self.config = config
-        self.controller = PipelineController(config)
+        self.controller = PipelineController(config, log_dir)
         self.logger = self.controller.logger
         
         # Initialize components
@@ -226,13 +252,6 @@ class MarinePollutionPipeline:
             self.logger.info(f"Experiment ID: {self.config.experiment_id}")
             self.logger.info(f"Start time: {datetime.now().isoformat()}")
             
-            # Log configuration
-            if available_modules['config']:
-                from src.utils.config import ConfigManager
-                config_manager = ConfigManager()
-                config_dict = config_manager._config_to_dict(self.config)
-                self.logger.log_config(config_dict)
-            
             # Perform health check
             self.controller.check_health()
             
@@ -245,14 +264,18 @@ class MarinePollutionPipeline:
             for step in steps:
                 if step == 'download' and not available_modules['downloader']:
                     self.logger.warning("Download step skipped - downloader module not available")
-                elif step == 'process' and not available_modules['data_processing']:
-                    self.logger.warning("Process step skipped - data processing modules not available")
+                elif step == 'process' and not available_modules['data_loader']:
+                    self.logger.warning("Process step skipped - data loader/preprocessor modules not available")
                 elif step == 'train' and not available_modules['trainer']:
                     self.logger.warning("Train step skipped - trainer module not available")
                 elif step == 'evaluate' and not available_modules['analyzer']:
                     self.logger.warning("Evaluate step skipped - analyzer module not available")
                 else:
                     available_steps.append(step)
+            
+            if not available_steps:
+                self.logger.error("No available steps to execute. Check module availability.")
+                return
             
             self.logger.info(f"Pipeline steps to execute: {', '.join(available_steps)}")
             
@@ -282,6 +305,8 @@ class MarinePollutionPipeline:
             
         except Exception as e:
             self.logger.error(f"Pipeline failed: {e}")
+            import traceback
+            traceback.print_exc()
             raise
     
     def _download_data(self):
@@ -310,8 +335,8 @@ class MarinePollutionPipeline:
         """Process and prepare data for modeling."""
         self.logger.info("Step 2: Processing marine data")
         
-        if not available_modules['data_processing']:
-            self.logger.error("Data processing modules not available. Cannot process data.")
+        if not available_modules['data_loader']:
+            self.logger.error("Data loader/preprocessor modules not available. Cannot process data.")
             return
         
         try:
@@ -335,13 +360,28 @@ class MarinePollutionPipeline:
                 feature_vars=self.config.data.feature_variables
             )
             
-            splitter = DataSplitter(
-                test_size=self.config.training.test_size,
-                val_size=self.config.training.validation_size,
-                random_state=self.config.training.random_state
-            )
-            
-            splits = splitter.split(X, y, temporal=True)
+            # Check if splitter is available
+            if available_modules['splitter']:
+                splitter = DataSplitter(
+                    test_size=self.config.training.test_size,
+                    val_size=self.config.training.validation_size,
+                    random_state=self.config.training.random_state
+                )
+                splits = splitter.split(X, y, temporal=True)
+            else:
+                # Simple split if splitter not available
+                from sklearn.model_selection import train_test_split
+                X_temp, X_test, y_temp, y_test = train_test_split(
+                    X, y, test_size=self.config.training.test_size, random_state=self.config.training.random_state
+                )
+                val_size = self.config.training.validation_size / (1 - self.config.training.test_size)
+                X_train, X_val, y_train, y_val = train_test_split(
+                    X_temp, y_temp, test_size=val_size, random_state=self.config.training.random_state
+                )
+                splits = {
+                    'X_train': X_train, 'X_val': X_val, 'X_test': X_test,
+                    'y_train': y_train, 'y_val': y_val, 'y_test': y_test
+                }
             
             # Save processed data
             output_dir = self.config.data.processed_dir / self.config.experiment_id
@@ -523,8 +563,13 @@ def main():
             config.data.raw_dir = args.data_dir / "raw"
             config.data.processed_dir = args.data_dir / "processed"
         
+        # Update config with command line arguments
+        if args.debug:
+            import logging
+            logging.getLogger().setLevel(logging.DEBUG)
+        
         # Create and run pipeline
-        pipeline = MarinePollutionPipeline(config)
+        pipeline = MarinePollutionPipeline(config, args.log_dir)
         pipeline.run(steps=args.steps)
         
         print("\n" + "="*80)
