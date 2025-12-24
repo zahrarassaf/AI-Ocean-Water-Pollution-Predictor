@@ -1,472 +1,572 @@
 """
-Google Drive integration for data loading
+Google Drive integration for NetCDF data loading
 """
 
 import os
 import io
 import gdown
 import zipfile
+import tarfile
 from pathlib import Path
-from typing import List, Optional, Union
+from typing import List, Optional, Union, Dict, Tuple
 import logging
 import pandas as pd
 import numpy as np
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
-from google.auth.transport.requests import Request
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseDownload
+import xarray as xr
+import tempfile
+import shutil
+from tqdm import tqdm
+import requests
 
 from ..config.constants import DATA_DIR
 from ..utils.logger import setup_logger
 
 logger = setup_logger(__name__)
 
-class GoogleDriveLoader:
-    """Load data from Google Drive"""
+class NetCDFDriveDownloader:
+    """Specialized downloader for NetCDF files from Google Drive"""
     
-    # Scopes for Google Drive API
-    SCOPES = ['https://www.googleapis.com/auth/drive.readonly']
+    def __init__(self, chunk_size: int = 1024 * 1024):  # 1MB chunks
+        self.chunk_size = chunk_size
+        self.session = requests.Session()
+        logger.info("Initialized NetCDFDriveDownloader")
     
-    def __init__(self, credentials_path: Optional[str] = None):
-        """
-        Initialize Google Drive loader
-        
-        Parameters
-        ----------
-        credentials_path : str, optional
-            Path to Google OAuth credentials JSON file
-        """
-        self.credentials_path = credentials_path
-        self.service = None
-        self._authenticate()
-    
-    def _authenticate(self):
-        """Authenticate with Google Drive API"""
-        creds = None
-        
-        # Token file stores user's access and refresh tokens
-        token_file = Path('token.json')
-        
-        if token_file.exists():
-            creds = Credentials.from_authorized_user_file(str(token_file), self.SCOPES)
-        
-        # If there are no (valid) credentials available, let the user log in
-        if not creds or not creds.valid:
-            if creds and creds.expired and creds.refresh_token:
-                creds.refresh(Request())
-            else:
-                if self.credentials_path:
-                    flow = InstalledAppFlow.from_client_secrets_file(
-                        self.credentials_path, self.SCOPES
-                    )
-                else:
-                    # Try to find credentials in standard locations
-                    possible_paths = [
-                        'credentials.json',
-                        'client_secrets.json',
-                        '.credentials/google_credentials.json'
-                    ]
-                    
-                    for path in possible_paths:
-                        if Path(path).exists():
-                            flow = InstalledAppFlow.from_client_secrets_file(
-                                path, self.SCOPES
-                            )
-                            break
-                    else:
-                        raise FileNotFoundError(
-                            "Google OAuth credentials not found. "
-                            "Please provide credentials_path or place credentials.json in project root."
-                        )
-                
-                creds = flow.run_local_server(port=0)
-            
-            # Save the credentials for the next run
-            with open(token_file, 'w') as token:
-                token.write(creds.to_json())
-        
-        self.service = build('drive', 'v3', credentials=creds)
-        logger.info("Authenticated with Google Drive API")
-    
-    def download_file_by_id(self, 
-                          file_id: str, 
-                          output_path: Union[str, Path],
-                          mime_type: Optional[str] = None) -> Path:
-        """
-        Download file from Google Drive by file ID
-        
-        Parameters
-        ----------
-        file_id : str
-            Google Drive file ID
-        output_path : str or Path
-            Output file path
-        mime_type : str, optional
-            MIME type of the file
-            
-        Returns
-        -------
-        Path
-            Path to downloaded file
-        """
-        output_path = Path(output_path)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        try:
-            request = self.service.files().get_media(fileId=file_id)
-            
-            with open(output_path, 'wb') as f:
-                downloader = MediaIoBaseDownload(f, request)
-                done = False
-                
-                while not done:
-                    status, done = downloader.next_chunk()
-                    if status:
-                        logger.info(f"Downloaded {int(status.progress() * 100)}%")
-            
-            logger.info(f"Downloaded file to {output_path}")
-            return output_path
-            
-        except Exception as e:
-            logger.error(f"Error downloading file {file_id}: {e}")
-            raise
-    
-    def download_folder(self, 
-                       folder_id: str, 
-                       output_dir: Union[str, Path]) -> List[Path]:
-        """
-        Download all files from a Google Drive folder
-        
-        Parameters
-        ----------
-        folder_id : str
-            Google Drive folder ID
-        output_dir : str or Path
-            Output directory
-            
-        Returns
-        -------
-        List[Path]
-            List of downloaded file paths
-        """
-        output_dir = Path(output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
-        
-        downloaded_files = []
-        
-        try:
-            # List all files in the folder
-            query = f"'{folder_id}' in parents and trashed = false"
-            results = self.service.files().list(
-                q=query,
-                fields="files(id, name, mimeType)"
-            ).execute()
-            
-            files = results.get('files', [])
-            
-            if not files:
-                logger.warning(f"No files found in folder {folder_id}")
-                return downloaded_files
-            
-            logger.info(f"Found {len(files)} files in folder")
-            
-            for file in files:
-                file_id = file['id']
-                file_name = file['name']
-                mime_type = file.get('mimeType')
-                
-                output_path = output_dir / file_name
-                
-                logger.info(f"Downloading {file_name}...")
-                downloaded_path = self.download_file_by_id(
-                    file_id, output_path, mime_type
-                )
-                downloaded_files.append(downloaded_path)
-            
-            logger.info(f"Downloaded {len(downloaded_files)} files to {output_dir}")
-            return downloaded_files
-            
-        except Exception as e:
-            logger.error(f"Error downloading folder {folder_id}: {e}")
-            raise
-    
-    def download_from_shareable_link(self, 
-                                   link: str, 
-                                   output_path: Union[str, Path]) -> Path:
-        """
-        Download file from shareable Google Drive link using gdown
-        
-        Parameters
-        ----------
-        link : str
-            Google Drive shareable link
-        output_path : str or Path
-            Output file path
-            
-        Returns
-        -------
-        Path
-            Path to downloaded file
-        """
-        output_path = Path(output_path)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        try:
-            # Extract file ID from link
-            file_id = self._extract_file_id_from_link(link)
-            
-            # Download using gdown
-            gdown.download(
-                f"https://drive.google.com/uc?id={file_id}",
-                str(output_path),
-                quiet=False
-            )
-            
-            logger.info(f"Downloaded file from link to {output_path}")
-            return output_path
-            
-        except Exception as e:
-            logger.error(f"Error downloading from link {link}: {e}")
-            raise
-    
-    def _extract_file_id_from_link(self, link: str) -> str:
-        """Extract file ID from Google Drive shareable link"""
+    def extract_file_id(self, url: str) -> Optional[str]:
+        """Extract file ID from various Google Drive URL formats"""
         import re
         
-        # Pattern for Google Drive links
         patterns = [
-            r'/file/d/([a-zA-Z0-9_-]+)',
-            r'id=([a-zA-Z0-9_-]+)',
-            r'open\?id=([a-zA-Z0-9_-]+)'
+            r'/file/d/([a-zA-Z0-9_-]+)',  # /file/d/FILE_ID/view
+            r'id=([a-zA-Z0-9_-]+)',        # ?id=FILE_ID
+            r'/d/([a-zA-Z0-9_-]+)/',       # /d/FILE_ID/
+            r'/d/([a-zA-Z0-9_-]+)$',       # /d/FILE_ID
+            r'open\?id=([a-zA-Z0-9_-]+)',  # open?id=FILE_ID
         ]
         
         for pattern in patterns:
-            match = re.search(pattern, link)
+            match = re.search(pattern, url)
             if match:
                 return match.group(1)
         
-        raise ValueError(f"Could not extract file ID from link: {link}")
+        return None
     
-    def download_all_project_files(self, 
-                                 file_links: List[str],
-                                 output_dir: Union[str, Path] = DATA_DIR / 'raw') -> Dict[str, Path]:
+    def get_direct_download_url(self, file_id: str) -> str:
+        """Get direct download URL for Google Drive file"""
+        return f"https://drive.google.com/uc?id={file_id}&export=download"
+    
+    def download_netcdf(self, 
+                       url: str, 
+                       output_path: Union[str, Path],
+                       description: str = "Downloading") -> Path:
         """
-        Download all project files from Google Drive links
+        Download NetCDF file with progress bar
         
         Parameters
         ----------
-        file_links : list
-            List of Google Drive shareable links
+        url : str
+            Google Drive URL
+        output_path : str or Path
+            Output file path
+        description : str
+            Description for progress bar
+            
+        Returns
+        -------
+        Path
+            Path to downloaded file
+        """
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Extract file ID
+        file_id = self.extract_file_id(url)
+        if not file_id:
+            raise ValueError(f"Could not extract file ID from URL: {url}")
+        
+        # Get direct download URL
+        download_url = self.get_direct_download_url(file_id)
+        
+        logger.info(f"Downloading {description} from {url}")
+        logger.info(f"File ID: {file_id}")
+        logger.info(f"Output: {output_path}")
+        
+        try:
+            # Use gdown for reliable download
+            gdown.download(
+                download_url,
+                str(output_path),
+                quiet=False,
+                fuzzy=True,
+                resume=True
+            )
+            
+            # Verify the file is a valid NetCDF
+            self._validate_netcdf(output_path)
+            
+            logger.info(f"✓ Successfully downloaded {output_path.name}")
+            return output_path
+            
+        except Exception as e:
+            logger.error(f"✗ Failed to download {url}: {e}")
+            
+            # Try alternative method
+            return self._download_with_requests(download_url, output_path, description)
+    
+    def _download_with_requests(self, 
+                               url: str, 
+                               output_path: Path,
+                               description: str) -> Path:
+        """Alternative download method using requests"""
+        try:
+            # Start session
+            response = self.session.get(url, stream=True, timeout=30)
+            response.raise_for_status()
+            
+            # Get file size
+            total_size = int(response.headers.get('content-length', 0))
+            
+            # Download with progress bar
+            with open(output_path, 'wb') as f, tqdm(
+                desc=description,
+                total=total_size,
+                unit='B',
+                unit_scale=True,
+                unit_divisor=1024,
+            ) as pbar:
+                for chunk in response.iter_content(chunk_size=self.chunk_size):
+                    if chunk:
+                        f.write(chunk)
+                        pbar.update(len(chunk))
+            
+            self._validate_netcdf(output_path)
+            logger.info(f"✓ Downloaded via requests: {output_path.name}")
+            return output_path
+            
+        except Exception as e:
+            logger.error(f"✗ Requests download also failed: {e}")
+            
+            # Clean up partial file
+            if output_path.exists():
+                output_path.unlink()
+            
+            raise
+    
+    def _validate_netcdf(self, filepath: Path):
+        """Validate that file is a proper NetCDF"""
+        try:
+            # Quick validation by trying to open it
+            with xr.open_dataset(filepath, engine='netcdf4') as ds:
+                # Just check if it can be opened
+                logger.info(f"NetCDF validation: {len(ds.data_vars)} variables, "
+                          f"dims: {dict(ds.dims)}")
+                return True
+        except Exception as e:
+            logger.error(f"Invalid NetCDF file {filepath}: {e}")
+            raise ValueError(f"File is not a valid NetCDF: {e}")
+    
+    def download_project_netcdf_files(self,
+                                     urls: List[str],
+                                     output_dir: Union[str, Path] = DATA_DIR / 'raw',
+                                     filenames: Optional[List[str]] = None) -> Dict[str, Path]:
+        """
+        Download all NetCDF files for the project
+        
+        Parameters
+        ----------
+        urls : list
+            List of Google Drive URLs
         output_dir : str or Path
             Output directory
+        filenames : list, optional
+            Custom filenames
             
         Returns
         -------
         dict
-            Dictionary mapping file names to paths
+            Dictionary mapping names to file paths
         """
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         
         downloaded_files = {}
         
-        for i, link in enumerate(file_links):
+        for i, url in enumerate(urls):
             try:
                 # Generate filename
-                if i < len(file_links):
-                    filename = f"dataset_{i+1}.csv"
+                if filenames and i < len(filenames):
+                    filename = filenames[i]
+                    # Ensure .nc extension
+                    if not filename.endswith('.nc'):
+                        filename += '.nc'
                 else:
-                    filename = f"dataset_{link[-10:]}.csv"
+                    # Try to extract name from URL or use generic
+                    filename = self._extract_filename_from_url(url) or f"dataset_{i+1}.nc"
                 
                 output_path = output_dir / filename
                 
-                logger.info(f"Downloading file {i+1}/{len(file_links)}...")
-                downloaded_path = self.download_from_shareable_link(link, output_path)
+                # Skip if already exists and valid
+                if output_path.exists():
+                    try:
+                        self._validate_netcdf(output_path)
+                        logger.info(f"✓ File already exists and is valid: {filename}")
+                        downloaded_files[filename] = output_path
+                        continue
+                    except:
+                        logger.warning(f"Existing file is invalid, re-downloading: {filename}")
                 
-                # Store mapping
+                # Download file
+                description = f"File {i+1}/{len(urls)}"
+                downloaded_path = self.download_netcdf(url, output_path, description)
+                
                 downloaded_files[filename] = downloaded_path
                 
             except Exception as e:
                 logger.error(f"Failed to download file {i+1}: {e}")
                 continue
         
-        logger.info(f"Downloaded {len(downloaded_files)}/{len(file_links)} files")
+        logger.info(f"Download completed: {len(downloaded_files)}/{len(urls)} files")
         return downloaded_files
     
-    def extract_zip_files(self, 
-                         input_dir: Union[str, Path],
-                         output_dir: Optional[Union[str, Path]] = None) -> List[Path]:
+    def _extract_filename_from_url(self, url: str) -> Optional[str]:
+        """Extract filename from URL parameters"""
+        import urllib.parse
+        
+        try:
+            parsed = urllib.parse.urlparse(url)
+            query = urllib.parse.parse_qs(parsed.query)
+            
+            # Check for filename in query parameters
+            if 'name' in query:
+                return query['name'][0]
+            
+            # Try to get from path
+            path = parsed.path
+            if path.endswith('/view'):
+                path = path[:-5]  # Remove /view
+            
+            # Extract last part
+            filename = path.split('/')[-1]
+            if filename and '.' in filename:
+                return filename
+            
+        except:
+            pass
+        
+        return None
+    
+    def merge_netcdf_files(self,
+                          filepaths: List[Path],
+                          output_path: Union[str, Path],
+                          merge_dim: str = 'time') -> Path:
         """
-        Extract all ZIP files in directory
+        Merge multiple NetCDF files
         
         Parameters
         ----------
-        input_dir : str or Path
-            Directory containing ZIP files
-        output_dir : str or Path, optional
-            Output directory for extracted files
+        filepaths : list
+            List of NetCDF file paths
+        output_path : str or Path
+            Output merged file path
+        merge_dim : str
+            Dimension to merge along
             
         Returns
         -------
-        List[Path]
-            List of extracted file paths
+        Path
+            Path to merged file
         """
-        input_dir = Path(input_dir)
+        output_path = Path(output_path)
         
-        if output_dir is None:
-            output_dir = input_dir.parent / "extracted"
+        logger.info(f"Merging {len(filepaths)} NetCDF files...")
         
-        output_dir = Path(output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
-        
-        extracted_files = []
-        
-        # Find all ZIP files
-        zip_files = list(input_dir.glob("*.zip"))
-        
-        if not zip_files:
-            logger.info(f"No ZIP files found in {input_dir}")
-            return extracted_files
-        
-        for zip_file in zip_files:
-            try:
-                logger.info(f"Extracting {zip_file.name}...")
-                
-                with zipfile.ZipFile(zip_file, 'r') as zip_ref:
-                    # Extract all files
-                    zip_ref.extractall(output_dir)
-                    
-                    # Get list of extracted files
-                    extracted = [output_dir / name for name in zip_ref.namelist()]
-                    extracted_files.extend(extracted)
-                
-                logger.info(f"Extracted {len(extracted)} files from {zip_file.name}")
-                
-            except Exception as e:
-                logger.error(f"Error extracting {zip_file.name}: {e}")
-                continue
-        
-        logger.info(f"Extracted total {len(extracted_files)} files to {output_dir}")
-        return extracted_files
-
-# Simplified version using gdown (no OAuth required)
-class SimpleDriveDownloader:
-    """Simplified Google Drive downloader using gdown only"""
+        try:
+            # Open all datasets
+            datasets = []
+            for filepath in filepaths:
+                ds = xr.open_dataset(filepath, engine='netcdf4')
+                datasets.append(ds)
+                logger.info(f"  Loaded {filepath.name}: {dict(ds.dims)}")
+            
+            # Merge datasets
+            merged = xr.concat(datasets, dim=merge_dim)
+            
+            # Sort by time if time dimension exists
+            if 'time' in merged.dims:
+                merged = merged.sortby('time')
+            
+            # Save merged dataset
+            merged.to_netcdf(output_path)
+            
+            # Close all datasets
+            for ds in datasets:
+                ds.close()
+            
+            logger.info(f"✓ Merged dataset saved: {output_path}")
+            logger.info(f"  Dimensions: {dict(merged.dims)}")
+            logger.info(f"  Variables: {list(merged.data_vars)}")
+            
+            return output_path
+            
+        except Exception as e:
+            logger.error(f"Failed to merge NetCDF files: {e}")
+            raise
     
-    def __init__(self):
-        logger.info("Initialized SimpleDriveDownloader")
-    
-    def download_files(self, 
-                      file_links: List[str],
-                      output_dir: Union[str, Path] = DATA_DIR / 'raw',
-                      filenames: Optional[List[str]] = None) -> Dict[str, Path]:
+    def analyze_netcdf_structure(self, filepath: Path) -> Dict:
         """
-        Download files from Google Drive links
+        Analyze structure of NetCDF file
         
         Parameters
         ----------
-        file_links : list
-            List of Google Drive shareable links
-        output_dir : str or Path
-            Output directory
-        filenames : list, optional
-            Custom filenames for downloaded files
+        filepath : Path
+            Path to NetCDF file
             
         Returns
         -------
         dict
-            Dictionary mapping original filenames to downloaded paths
+            Structure information
         """
-        output_dir = Path(output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            with xr.open_dataset(filepath, engine='netcdf4') as ds:
+                info = {
+                    'filename': filepath.name,
+                    'dimensions': dict(ds.dims),
+                    'variables': {},
+                    'global_attributes': dict(ds.attrs),
+                    'coordinate_variables': list(ds.coords)
+                }
+                
+                # Variable details
+                for var_name in ds.data_vars:
+                    var = ds[var_name]
+                    info['variables'][var_name] = {
+                        'dtype': str(var.dtype),
+                        'dimensions': list(var.dims),
+                        'shape': var.shape,
+                        'attributes': dict(var.attrs),
+                        'has_nan': bool(np.isnan(var.values).any()),
+                        'nan_percentage': float(np.isnan(var.values).sum() / var.values.size * 100)
+                    }
+                
+                return info
+                
+        except Exception as e:
+            logger.error(f"Failed to analyze {filepath}: {e}")
+            return {'error': str(e), 'filename': filepath.name}
+    
+    def compare_netcdf_files(self, filepaths: List[Path]) -> Dict:
+        """
+        Compare multiple NetCDF files
         
-        downloaded_files = {}
+        Parameters
+        ----------
+        filepaths : list
+            List of NetCDF file paths
+            
+        Returns
+        -------
+        dict
+            Comparison results
+        """
+        comparison = {
+            'common_variables': set(),
+            'unique_variables': {},
+            'dimension_analysis': {},
+            'temporal_coverage': {},
+            'spatial_coverage': {}
+        }
         
-        for i, link in enumerate(file_links):
-            try:
-                # Generate filename
-                if filenames and i < len(filenames):
-                    filename = filenames[i]
+        all_structures = []
+        
+        for filepath in filepaths:
+            structure = self.analyze_netcdf_structure(filepath)
+            all_structures.append(structure)
+            
+            if 'variables' in structure:
+                comparison['unique_variables'][filepath.name] = list(structure['variables'].keys())
+                
+                if not comparison['common_variables']:
+                    comparison['common_variables'] = set(structure['variables'].keys())
                 else:
-                    # Try to get filename from link or use generic name
-                    filename = self._get_filename_from_link(link) or f"dataset_{i+1}.csv"
-                
-                # Ensure filename has extension
-                if not any(filename.endswith(ext) for ext in ['.csv', '.nc', '.h5', '.json']):
-                    filename += '.csv'
-                
-                output_path = output_dir / filename
-                
-                logger.info(f"Downloading {filename} ({i+1}/{len(file_links)})...")
-                
-                # Download file
-                self._download_with_gdown(link, output_path)
-                
-                downloaded_files[filename] = output_path
-                logger.info(f"✓ Downloaded {filename}")
-                
-            except Exception as e:
-                logger.error(f"✗ Failed to download file {i+1}: {e}")
-                continue
+                    comparison['common_variables'] = comparison['common_variables'].intersection(
+                        set(structure['variables'].keys())
+                    )
         
-        logger.info(f"Download completed: {len(downloaded_files)}/{len(file_links)} files")
-        return downloaded_files
+        # Analyze each file
+        for i, structure in enumerate(all_structures):
+            filename = filepaths[i].name
+            
+            if 'dimensions' in structure:
+                comparison['dimension_analysis'][filename] = structure['dimensions']
+            
+            # Try to extract temporal info
+            if 'time' in structure.get('dimensions', {}):
+                try:
+                    with xr.open_dataset(filepaths[i], engine='netcdf4') as ds:
+                        if 'time' in ds:
+                            time_var = ds['time']
+                            if hasattr(time_var, 'values') and len(time_var) > 0:
+                                times = time_var.values
+                                if hasattr(times, '__len__'):
+                                    comparison['temporal_coverage'][filename] = {
+                                        'start': str(times[0]) if len(times) > 0 else None,
+                                        'end': str(times[-1]) if len(times) > 0 else None,
+                                        'n_timesteps': len(times)
+                                    }
+                except:
+                    pass
+        
+        comparison['common_variables'] = list(comparison['common_variables'])
+        
+        logger.info(f"Comparison results:")
+        logger.info(f"  Common variables: {len(comparison['common_variables'])}")
+        logger.info(f"  Unique variables per file: {comparison['unique_variables']}")
+        
+        return comparison
+
+# Main downloader class
+class MarineDataDownloader:
+    """Main downloader for marine productivity data"""
     
-    def _get_filename_from_link(self, link: str) -> Optional[str]:
-        """Extract filename from Google Drive link if possible"""
-        import re
-        
-        # Check if filename is in URL parameters
-        match = re.search(r'[?&]name=([^&]+)', link)
-        if match:
-            return match.group(1)
-        
-        return None
+    def __init__(self):
+        self.netcdf_downloader = NetCDFDriveDownloader()
+        logger.info("Initialized MarineDataDownloader")
     
-    def _download_with_gdown(self, link: str, output_path: Path):
-        """Download file using gdown with proper file ID extraction"""
-        import gdown
+    def download_all_data(self,
+                         urls: Optional[List[str]] = None,
+                         output_dir: Union[str, Path] = DATA_DIR / 'raw') -> Dict:
+        """
+        Download all marine productivity data
         
-        # Extract file ID from link
-        file_id = self._extract_file_id(link)
+        Parameters
+        ----------
+        urls : list, optional
+            List of Google Drive URLs
+        output_dir : str or Path
+            Output directory
+            
+        Returns
+        -------
+        dict
+            Download results
+        """
+        if urls is None:
+            # Use your specific NetCDF file URLs
+            urls = [
+                "https://drive.google.com/file/d/17YEvHDE9DmtLsXKDGYwrGD8OE46swNDc/view?usp=sharing",
+                "https://drive.google.com/file/d/16DyROUrgvfRQRvrBS3W3Y4o44vd-ZB67/view?usp=sharing",
+                "https://drive.google.com/file/d/1c3f92nsOCY5hJv3zy0SAPXf8WsAVYNVI/view?usp=sharing",
+                "https://drive.google.com/file/d/1JapTCN9CLn_hy9CY4u3Gcanv283LBdXy/view?usp=sharing"
+            ]
         
-        if not file_id:
-            raise ValueError(f"Could not extract file ID from link: {link}")
-        
-        # Construct direct download URL
-        download_url = f"https://drive.google.com/uc?id={file_id}&export=download"
-        
-        # Download file
-        gdown.download(
-            download_url,
-            str(output_path),
-            quiet=False,
-            fuzzy=True
-        )
-        
-        # Verify file was downloaded
-        if not output_path.exists() or output_path.stat().st_size == 0:
-            raise IOError(f"Downloaded file is empty or doesn't exist: {output_path}")
-    
-    def _extract_file_id(self, link: str) -> Optional[str]:
-        """Extract file ID from various Google Drive link formats"""
-        import re
-        
-        patterns = [
-            # Standard view link
-            r'/file/d/([a-zA-Z0-9_-]+)',
-            # Open link
-            r'open\?id=([a-zA-Z0-9_-]+)',
-            # Direct ID
-            r'id=([a-zA-Z0-9_-]+)',
-            # Shortened URL (needs following redirect)
-            r'/d/([a-zA-Z0-9_-]+)',
+        # Suggested filenames based on common marine data
+        suggested_filenames = [
+            "chlorophyll_data.nc",      # chl data
+            "light_attenuation.nc",     # kd490 data
+            "water_clarity.nc",         # zsd data
+            "primary_productivity.nc"   # pp data
         ]
         
-        for pattern in patterns:
-            match = re.search(pattern, link)
-            if match:
-                return match.group(1)
+        logger.info("=" * 60)
+        logger.info("DOWNLOADING MARINE PRODUCTIVITY DATA")
+        logger.info("=" * 60)
+        logger.info(f"Found {len(urls)} NetCDF files to download")
         
-        return None
+        # Download files
+        downloaded_files = self.netcdf_downloader.download_project_netcdf_files(
+            urls=urls,
+            output_dir=output_dir,
+            filenames=suggested_filenames
+        )
+        
+        # Analyze downloaded files
+        analysis_results = {}
+        comparison_results = {}
+        
+        if downloaded_files:
+            # Analyze each file
+            for filename, filepath in downloaded_files.items():
+                logger.info(f"\nAnalyzing {filename}...")
+                analysis = self.netcdf_downloader.analyze_netcdf_structure(filepath)
+                analysis_results[filename] = analysis
+                
+                # Log key information
+                if 'variables' in analysis:
+                    logger.info(f"  Variables: {list(analysis['variables'].keys())}")
+                if 'dimensions' in analysis:
+                    logger.info(f"  Dimensions: {analysis['dimensions']}")
+            
+            # Compare files
+            logger.info("\n" + "-" * 40)
+            logger.info("COMPARING DATASETS")
+            logger.info("-" * 40)
+            
+            comparison_results = self.netcdf_downloader.compare_netcdf_files(
+                list(downloaded_files.values())
+            )
+            
+            logger.info(f"Common variables: {comparison_results.get('common_variables', [])}")
+        
+        results = {
+            'downloaded_files': {k: str(v) for k, v in downloaded_files.items()},
+            'file_analysis': analysis_results,
+            'comparison': comparison_results,
+            'output_dir': str(output_dir)
+        }
+        
+        logger.info("\n" + "=" * 60)
+        logger.info("DOWNLOAD COMPLETE")
+        logger.info("=" * 60)
+        
+        return results
+    
+    def create_merged_dataset(self,
+                            input_dir: Union[str, Path],
+                            output_file: Union[str, Path] = DATA_DIR / 'processed' / 'merged_data.nc',
+                            merge_strategy: str = 'concat') -> Path:
+        """
+        Create merged dataset from multiple NetCDF files
+        
+        Parameters
+        ----------
+        input_dir : str or Path
+            Input directory with NetCDF files
+        output_file : str or Path
+            Output merged file
+        merge_strategy : str
+            Merge strategy: 'concat', 'merge', 'combine'
+            
+        Returns
+        -------
+        Path
+            Path to merged file
+        """
+        input_dir = Path(input_dir)
+        output_file = Path(output_file)
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Find all NetCDF files
+        nc_files = list(input_dir.glob("*.nc"))
+        if not nc_files:
+            raise FileNotFoundError(f"No NetCDF files found in {input_dir}")
+        
+        logger.info(f"Found {len(nc_files)} NetCDF files to merge")
+        
+        if merge_strategy == 'concat':
+            # Simple concatenation along time dimension
+            merged_path = self.netcdf_downloader.merge_netcdf_files(
+                nc_files, output_file, merge_dim='time'
+            )
+        else:
+            # More sophisticated merge logic
+            merged_path = self._advanced_merge(nc_files, output_file, merge_strategy)
+        
+        return merged_path
+    
+    def _advanced_merge(self, 
+                       filepaths: List[Path], 
+                       output_path: Path,
+                       strategy: str) -> Path:
+        """Advanced merge strategies"""
+        # Implement based on your specific data structure
+        # This is a placeholder - customize based on your data
+        return self.netcdf_downloader.merge_netcdf_files(filepaths, output_path, 'time')
