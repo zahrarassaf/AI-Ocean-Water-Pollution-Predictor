@@ -10,18 +10,29 @@ import tarfile
 from pathlib import Path
 from typing import List, Optional, Union, Dict, Tuple
 import logging
-import pandas as pd
 import numpy as np
 import xarray as xr
 import tempfile
 import shutil
 from tqdm import tqdm
 import requests
+import re
+import urllib.parse
 
-from ..config.constants import DATA_DIR
-from ..utils.logger import setup_logger
+# Setup logger - CORRECTED: Use direct logging
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
-logger = setup_logger(__name__)
+# Add console handler if no handlers exist
+if not logger.handlers:
+    handler = logging.StreamHandler()
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+
+# Define DATA_DIR here to avoid import issues
+PROJECT_ROOT = Path(__file__).parent.parent.parent
+DATA_DIR = PROJECT_ROOT / "data"
 
 class NetCDFDriveDownloader:
     """Specialized downloader for NetCDF files from Google Drive"""
@@ -33,7 +44,6 @@ class NetCDFDriveDownloader:
     
     def extract_file_id(self, url: str) -> Optional[str]:
         """Extract file ID from various Google Drive URL formats"""
-        import re
         
         patterns = [
             r'/file/d/([a-zA-Z0-9_-]+)',  # /file/d/FILE_ID/view
@@ -229,8 +239,6 @@ class NetCDFDriveDownloader:
     
     def _extract_filename_from_url(self, url: str) -> Optional[str]:
         """Extract filename from URL parameters"""
-        import urllib.parse
-        
         try:
             parsed = urllib.parse.urlparse(url)
             query = urllib.parse.parse_qs(parsed.query)
@@ -423,7 +431,6 @@ class NetCDFDriveDownloader:
         
         return comparison
 
-# Main downloader class
 class MarineDataDownloader:
     """Main downloader for marine productivity data"""
     
@@ -570,3 +577,198 @@ class MarineDataDownloader:
         # Implement based on your specific data structure
         # This is a placeholder - customize based on your data
         return self.netcdf_downloader.merge_netcdf_files(filepaths, output_path, 'time')
+
+# Simplified version using gdown only
+class SimpleDriveDownloader:
+    """Simplified Google Drive downloader using gdown only"""
+    
+    def __init__(self):
+        # Setup logger
+        self.logger = logging.getLogger(__name__ + ".SimpleDriveDownloader")
+        self.logger.setLevel(logging.INFO)
+        
+        if not self.logger.handlers:
+            handler = logging.StreamHandler()
+            formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+            handler.setFormatter(formatter)
+            self.logger.addHandler(handler)
+        
+        self.logger.info("Initialized SimpleDriveDownloader")
+    
+    def download_files(self, 
+                      file_links: List[str],
+                      output_dir: Union[str, Path] = DATA_DIR / 'raw',
+                      filenames: Optional[List[str]] = None) -> Dict[str, Path]:
+        """
+        Download files from Google Drive links
+        
+        Parameters
+        ----------
+        file_links : list
+            List of Google Drive shareable links
+        output_dir : str or Path
+            Output directory
+        filenames : list, optional
+            Custom filenames for downloaded files
+            
+        Returns
+        -------
+        dict
+            Dictionary mapping original filenames to downloaded paths
+        """
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        
+        downloaded_files = {}
+        
+        for i, link in enumerate(file_links):
+            try:
+                # Generate filename
+                if filenames and i < len(filenames):
+                    filename = filenames[i]
+                else:
+                    # Try to get filename from link or use generic name
+                    filename = self._get_filename_from_link(link) or f"dataset_{i+1}.nc"
+                
+                # Ensure filename has .nc extension
+                if not filename.endswith('.nc'):
+                    filename += '.nc'
+                
+                output_path = output_dir / filename
+                
+                self.logger.info(f"Downloading {filename} ({i+1}/{len(file_links)})...")
+                
+                # Download file
+                self._download_with_gdown(link, output_path)
+                
+                downloaded_files[filename] = output_path
+                self.logger.info(f"✓ Downloaded {filename}")
+                
+            except Exception as e:
+                self.logger.error(f"✗ Failed to download file {i+1}: {e}")
+                continue
+        
+        self.logger.info(f"Download completed: {len(downloaded_files)}/{len(file_links)} files")
+        
+        return downloaded_files
+    
+    def _get_filename_from_link(self, link: str) -> Optional[str]:
+        """Extract filename from Google Drive link if possible"""
+        # Check if filename is in URL parameters
+        match = re.search(r'[?&]name=([^&]+)', link)
+        if match:
+            return match.group(1)
+        
+        return None
+    
+    def _download_with_gdown(self, link: str, output_path: Path):
+        """Download file using gdown with proper file ID extraction"""
+        
+        # Extract file ID from link
+        file_id = self._extract_file_id(link)
+        
+        if not file_id:
+            raise ValueError(f"Could not extract file ID from link: {link}")
+        
+        # Construct direct download URL
+        download_url = f"https://drive.google.com/uc?id={file_id}&export=download"
+        
+        # Download file
+        gdown.download(
+            download_url,
+            str(output_path),
+            quiet=False,
+            fuzzy=True
+        )
+        
+        # Verify file was downloaded
+        if not output_path.exists() or output_path.stat().st_size == 0:
+            raise IOError(f"Downloaded file is empty or doesn't exist: {output_path}")
+        
+        # Quick validation
+        try:
+            with xr.open_dataset(output_path, engine='netcdf4') as ds:
+                self.logger.info(f"Validated {output_path.name}: {len(ds.data_vars)} variables")
+        except Exception as e:
+            self.logger.warning(f"File validation warning: {e}")
+    
+    def _extract_file_id(self, link: str) -> Optional[str]:
+        """Extract file ID from various Google Drive link formats"""
+        patterns = [
+            # Standard view link
+            r'/file/d/([a-zA-Z0-9_-]+)',
+            # Open link
+            r'open\?id=([a-zA-Z0-9_-]+)',
+            # Direct ID
+            r'id=([a-zA-Z0-9_-]+)',
+            # Shortened URL (needs following redirect)
+            r'/d/([a-zA-Z0-9_-]+)',
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, link)
+            if match:
+                return match.group(1)
+        
+        return None
+
+# Utility function for easy downloading
+def download_marine_data(urls: List[str] = None, output_dir: str = "data/raw") -> Dict:
+    """
+    Utility function to download marine data easily
+    
+    Parameters
+    ----------
+    urls : list, optional
+        List of Google Drive URLs
+    output_dir : str
+        Output directory
+        
+    Returns
+    -------
+    dict
+        Download results
+    """
+    if urls is None:
+        urls = [
+            "https://drive.google.com/file/d/17YEvHDE9DmtLsXKDGYwrGD8OE46swNDc/view?usp=sharing",
+            "https://drive.google.com/file/d/16DyROUrgvfRQRvrBS3W3Y4o44vd-ZB67/view?usp=sharing",
+            "https://drive.google.com/file/d/1c3f92nsOCY5hJv3zy0SAPXf8WsAVYNVI/view?usp=sharing",
+            "https://drive.google.com/file/d/1JapTCN9CLn_hy9CY4u3Gcanv283LBdXy/view?usp=sharing"
+        ]
+    
+    downloader = MarineDataDownloader()
+    return downloader.download_all_data(urls=urls, output_dir=output_dir)
+
+# Main execution for testing
+if __name__ == "__main__":
+    # Test the downloader
+    import sys
+    
+    # Setup logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+    
+    # Get URLs from command line or use defaults
+    urls = sys.argv[1:] if len(sys.argv) > 1 else None
+    
+    try:
+        results = download_marine_data(urls)
+        print("\n" + "="*60)
+        print("DOWNLOAD SUMMARY")
+        print("="*60)
+        
+        downloaded = results.get('downloaded_files', {})
+        print(f"Downloaded {len(downloaded)} files:")
+        
+        for filename, filepath in downloaded.items():
+            filepath = Path(filepath)
+            if filepath.exists():
+                size_mb = filepath.stat().st_size / (1024 * 1024)
+                print(f"  • {filename}: {size_mb:.1f} MB at {filepath}")
+        
+    except Exception as e:
+        print(f"Error: {e}")
+        sys.exit(1)
