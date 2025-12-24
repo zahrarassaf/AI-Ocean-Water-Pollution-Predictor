@@ -1,52 +1,86 @@
 """
-Environment-specific settings
+Project-wide constants and configuration
 """
 
 import os
-from dotenv import load_dotenv
+from pathlib import Path
+from dataclasses import dataclass
+from typing import List, Dict, Tuple, Optional
 
-load_dotenv()
+# Project paths
+PROJECT_ROOT = Path(__file__).parent.parent.parent
+DATA_DIR = PROJECT_ROOT / "data"
+MODEL_DIR = PROJECT_ROOT / "models"
+RESULTS_DIR = PROJECT_ROOT / "results"
+LOG_DIR = PROJECT_ROOT / "logs"
 
-class Settings:
-    """Application settings"""
-    
-    # Environment
-    ENV = os.getenv('ENVIRONMENT', 'development')
-    DEBUG = os.getenv('DEBUG', 'False').lower() == 'true'
-    
-    # Paths
-    DATA_PATH = os.getenv('DATA_PATH', 'data/')
-    MODEL_PATH = os.getenv('MODEL_PATH', 'models/')
-    LOG_PATH = os.getenv('LOG_PATH', 'logs/')
-    
-    # Processing
-    MAX_WORKERS = int(os.getenv('MAX_WORKERS', os.cpu_count()))
-    USE_GPU = os.getenv('USE_GPU', 'True').lower() == 'true'
-    PRECISION = os.getenv('PRECISION', 'mixed')  # mixed, float32, float16
-    
-    # Logging
-    LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
-    LOG_FORMAT = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    
-    # API
-    API_HOST = os.getenv('API_HOST', '0.0.0.0')
-    API_PORT = int(os.getenv('API_PORT', 8000))
-    
-    @classmethod
-    def validate(cls):
-        """Validate all settings"""
-        required = ['DATA_PATH', 'MODEL_PATH']
-        for var in required:
-            if not getattr(cls, var):
-                raise ValueError(f"{var} must be set in environment")
-    
-    @classmethod
-    def get_device(cls):
-        """Get appropriate torch device"""
-        import torch
-        if cls.USE_GPU and torch.cuda.is_available():
-            return torch.device('cuda')
-        return torch.device('cpu')
+# Data constants
+DEFAULT_FEATURES = [
+    'chl',          # Chlorophyll concentration
+    'kd490',        # Diffuse attenuation coefficient at 490nm
+    'zsd',          # Secchi disk depth
+    'current_speed',
+    'current_direction',
+    'euphotic_depth',
+    'clarity_index'
+]
 
-settings = Settings()
-settings.validate()
+TARGET_VARIABLE = 'pp'  # Primary productivity
+
+# Model constants
+DEFAULT_MODEL_PARAMS = {
+    'random_forest': {
+        'n_estimators': 200,
+        'max_depth': None,
+        'min_samples_split': 2,
+        'min_samples_leaf': 1,
+        'max_features': 'sqrt',
+        'bootstrap': True,
+        'random_state': 42
+    },
+    'gradient_boosting': {
+        'n_estimators': 200,
+        'learning_rate': 0.05,
+        'max_depth': 5,
+        'random_state': 42
+    },
+    'neural_network': {
+        'hidden_layers': [128, 64, 32],
+        'dropout_rate': 0.3,
+        'learning_rate': 0.001,
+        'batch_size': 64,
+        'epochs': 100
+    }
+}
+
+# Uncertainty quantification
+UNCERTAINTY_METHODS = [
+    'ensemble',
+    'bayesian',
+    'gaussian_process',
+    'mc_dropout',
+    'quantile_regression'
+]
+
+@dataclass
+class TrainingConfig:
+    """Training configuration"""
+    test_size: float = 0.2
+    validation_size: float = 0.1
+    random_state: int = 42
+    n_folds: int = 5
+    early_stopping_patience: int = 10
+    max_epochs: int = 100
+    
+@dataclass
+class DataConfig:
+    """Data processing configuration"""
+    chunk_size: Dict[str, int] = None
+    interpolation_method: str = 'linear'
+    outlier_threshold: float = 3.0
+    normalize: bool = True
+    scale_method: str = 'standard'
+    
+    def __post_init__(self):
+        if self.chunk_size is None:
+            self.chunk_size = {'time': 30, 'lat': 100, 'lon': 100}
