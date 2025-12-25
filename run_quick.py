@@ -1,126 +1,73 @@
 #!/usr/bin/env python3
 """
-Quick start script for marine productivity predictor
+Quick runner for the complete project.
 """
 
 import subprocess
 import sys
-import os
-
-def run_command(cmd, description):
-    print(f"\n{'='*60}")
-    print(f"{description}")
-    print(f"{'='*60}")
-    print(f"Running: {cmd}")
-    
-    result = subprocess.run(cmd, shell=True, capture_output=True, text=True, encoding='utf-8')
-    
-    if result.returncode == 0:
-        print("[SUCCESS]")
-        if result.stdout:
-            # Print only first 500 chars
-            output_preview = result.stdout[:500]
-            if len(result.stdout) > 500:
-                output_preview += "..."
-            print(f"Output: {output_preview}")
-    else:
-        print("[FAILED]")
-        print(f"Error: {result.stderr}")
-        return False
-    
-    return True
-
-def main():
-    print("Marine Productivity Predictor - Quick Start")
-    print("=" * 60)
-    
-    # 1. Install minimal requirements (including bottleneck)
-    if not run_command(
-        "pip install numpy pandas scikit-learn xarray netcdf4 gdown bottleneck",
-        "1. Installing core dependencies"
-    ):
-        return
-    
-    # 2. Create directory structure
-    dirs = ["data/raw", "data/processed", "models", "results", "logs"]
-    for dir_path in dirs:
-        os.makedirs(dir_path, exist_ok=True)
-    print("\n[SUCCESS] Created directory structure")
-    
-    # 3. Run simplified download
-    print("\n" + "="*60)
-    print("2. Downloading test data")
-    print("="*60)
-    
-    # Create simple download script with ASCII characters only
-    download_script = '''import gdown
-import os
 from pathlib import Path
 
-urls = [
-    "https://drive.google.com/file/d/17YEvHDE9DmtLsXKDGYwrGD8OE46swNDc/view?usp=sharing",
-    "https://drive.google.com/file/d/16DyROUrgvfRQRvrBS3W3Y4o44vd-ZB67/view?usp=sharing",
-    "https://drive.google.com/file/d/1c3f92nsOCY5hJv3zy0SAPXf8WsAVYNVI/view?usp=sharing",
-    "https://drive.google.com/file/d/1JapTCN9CLn_hy9CY4u3Gcanv283LBdXy/view?usp=sharing"
-]
-
-filenames = ["chlorophyll.nc", "light_attenuation.nc", "water_clarity.nc", "productivity.nc"]
-
-print("Starting download...")
-for i, (url, filename) in enumerate(zip(urls, filenames)):
-    print(f"Downloading file {i+1}/{len(urls)}: {filename}")
+def run_command(command, description):
+    print(f"\n{'='*60}")
+    print(f"📋 {description}")
+    print(f"💻 Command: {command}")
+    print('='*60)
     
     try:
-        # Extract file ID
-        file_id = url.split('/d/')[1].split('/')[0]
-        output_path = f"data/raw/{filename}"
-        
-        gdown.download(
-            f"https://drive.google.com/uc?id={file_id}",
-            output_path,
-            quiet=False
+        result = subprocess.run(command, shell=True, check=True)
+        print(f"✅ {description} completed successfully!")
+        return True
+    except subprocess.CalledProcessError as e:
+        print(f"❌ {description} failed!")
+        print(f"Error: {e}")
+        return False
+
+def main():
+    print("🚀 MARINE POLLUTION PREDICTION - QUICK START")
+    print("="*60)
+    
+    # Step 1: Check if data exists
+    data_dir = Path("data/processed")
+    if not any(data_dir.glob("*.joblib")):
+        print("\n📥 Step 1: Downloading data...")
+        success = run_command(
+            "python run_pipeline.py --steps download",
+            "Download data"
         )
-        
-        # Check if file was downloaded
-        if Path(output_path).exists():
-            size_mb = Path(output_path).stat().st_size / (1024 * 1024)
-            print(f"[SUCCESS] Downloaded: {filename} ({size_mb:.1f} MB)")
-        else:
-            print(f"[FAILED] File not created: {filename}")
-            
-    except Exception as e:
-        print(f"[ERROR] Failed to download {filename}: {e}")
-
-print("\\nDownload process completed.")'''
+        if not success:
+            print("Data download failed. Using existing data if available.")
+    else:
+        print("✅ Data already exists. Skipping download.")
     
-    # Write download script with explicit encoding
-    try:
-        with open("quick_download.py", "w", encoding="utf-8") as f:
-            f.write(download_script)
-    except Exception as e:
-        print(f"[ERROR] Could not create download script: {e}")
-        return
+    # Step 2: Train model
+    print("\n🤖 Step 2: Training model...")
+    # Find the latest processed data
+    processed_files = list(data_dir.glob("*/*.joblib"))
+    if processed_files:
+        latest_data = max(processed_files, key=lambda x: x.stat().st_mtime)
+        success = run_command(
+            f'python complete_training_pipeline.py "{latest_data}" --output-dir "results/quick_run"',
+            "Train model"
+        )
+    else:
+        print("❌ No processed data found!")
+        sys.exit(1)
     
-    # Run the download script
-    if not run_command("python quick_download.py", "Downloading data"):
-        print("[WARNING] Download had issues, but continuing...")
-    
-    # 4. Clean up
-    if os.path.exists("quick_download.py"):
-        try:
-            os.remove("quick_download.py")
-        except:
-            pass
+    # Step 3: Deploy API
+    print("\n🌐 Step 3: Starting API server...")
+    print("Note: You need to manually run in a new terminal:")
+    print("python deploy_model.py serve")
+    print("\nOr press Enter to continue...")
+    input()
     
     print("\n" + "="*60)
-    print("QUICK START COMPLETED")
+    print("🎉 COMPLETE!")
     print("="*60)
-    print("\nNext steps:")
-    print("1. Check downloaded files in data/raw/")
-    print("2. Run: python run_pipeline.py --data-dir data/raw")
-    print("3. Or run individual scripts:")
-    print("   - python scripts/download_data.py")
-    print("   - python scripts/train_marine.py")
+    print("Next steps:")
+    print("1. Open new terminal")
+    print("2. Run: python deploy_model.py serve")
+    print("3. Open: http://localhost:8000/docs")
+    print("="*60)
 
 if __name__ == "__main__":
     main()
