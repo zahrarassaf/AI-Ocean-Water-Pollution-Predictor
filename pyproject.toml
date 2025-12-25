@@ -1,3 +1,4 @@
+# pyproject.toml
 [build-system]
 requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
@@ -5,102 +6,40 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "marine-pollution-predictor"
 version = "1.0.0"
-description = "AI-driven ocean water pollution prediction system"
+description = "AI system for marine water pollution prediction"
 readme = "README.md"
-license = {text = "MIT"}
 authors = [
-    {name = "Research Team", email = "research@example.com"}
+    {name = "AI Ocean Team", email = "team@ai-ocean.com"}
 ]
+license = {text = "MIT"}
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Science/Research",
-    "Topic :: Scientific/Engineering :: Artificial Intelligence",
-    "Topic :: Scientific/Engineering :: Atmospheric Science",
     "License :: OSI Approved :: MIT License",
-    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Environmental Science",
 ]
-requires-python = ">=3.8"
-dependencies = [
-    "numpy>=1.21.0",
-    "pandas>=1.3.0",
-    "scipy>=1.7.0",
-    "scikit-learn>=1.0.0",
-    "xarray>=2022.3.0",
-    "netcdf4>=1.5.8",
-    "dask>=2022.2.0",
-    "gdown>=4.6.0",
-    "torch>=1.12.0",
-    "torchvision>=0.13.0",
-    "matplotlib>=3.5.0",
-    "seaborn>=0.11.0",
-    "plotly>=5.10.0",
-    "tqdm>=4.62.0",
-    "pyyaml>=6.0",
-    "joblib>=1.1.0",
-    "hydra-core>=1.3.0",
-    "pytest>=7.0.0",
-    "pytest-cov>=4.0.0",
-]
-
-[project.optional-dependencies]
-dev = [
-    "black>=22.0.0",
-    "flake8>=5.0.0",
-    "mypy>=0.990",
-    "pre-commit>=2.20.0",
-    "jupyter>=1.0.0",
-    "ipykernel>=6.0.0",
-]
-gpu = [
-    "torch>=1.12.0+cu113",
-    "torchvision>=0.13.0+cu113",
-]
-full = [
-    "botorch>=0.7.0",
-    "gpytorch>=1.9.0",
-    "optuna>=3.0.0",
-    "mlflow>=2.0.0",
-]
-
-[project.urls]
-Homepage = "https://github.com/username/marine-pollution-predictor"
-Repository = "https://github.com/username/marine-pollution-predictor"
-Bug-Tracker = "https://github.com/username/marine-pollution-predictor/issues"
-
-[tool.setuptools.packages.find]
-where = ["src"]
-include = ["*"]
-exclude = ["tests*", "docs*"]
 
 [tool.black]
 line-length = 88
-target-version = ['py38']
-include = '\.pyi?$'
-extend-exclude = '''
-/(
-    \.eggs
-  | \.git
-  | \.hg
-  | \.mypy_cache
-  | \.tox
-  | \.venv
-  | _build
-  | buck-out
-  | build
-  | dist
-)/
-'''
+target-version = ['py39']
+
+[tool.isort]
+profile = "black"
+line_length = 88
 
 [tool.mypy]
-python_version = "3.8"
+python_version = "3.9"
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = true
 
 [tool.pytest.ini_options]
-minversion = "7.0"
-addopts = "-ra -q --cov=src --cov-report=term-missing"
 testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
