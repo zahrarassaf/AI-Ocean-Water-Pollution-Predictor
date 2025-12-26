@@ -1,0 +1,72 @@
+project:
+  name: "AI Ocean Water Pollution Predictor"
+  version: "1.0.0"
+
+data:
+  sources:
+    chlorophyll_concentration:
+      id: "17YEvHDE9DmtLsXKDGYwrGD8OE46swNDc"
+      filename: "chlorophyll_concentration.nc"
+    
+    diffuse_attenuation:
+      id: "16DyROUrgvfRQRvrBS3W3Y4o44vd-ZB67"
+      filename: "diffuse_attenuation.nc"
+    
+    primary_productivity:
+      id: "1JapTCN9CLn_hy9CY4u3Gcanv283LBdXy"
+      filename: "primary_productivity.nc"
+    
+    secchi_depth:
+      id: "1c3f92nsOCY5hJv3zy0SAPXf8WsAVYNVI"
+      filename: "secchi_depth.nc"
+  
+  directories:
+    raw: "data/raw"
+    processed: "data/processed"
+
+model:
+  type: "random_forest"
+  parameters:
+    n_estimators: 100
+    max_depth: 20
+    min_samples_split: 5
+    min_samples_leaf: 2
+    random_state: 42
+  
+  training:
+    test_size: 0.2
+    random_state: 42
+
+features:
+  target: "KD490"
+  predictors:
+    - "CHL"
+    - "CHL_uncertainty"
+    - "DIATO"
+    - "DIATO_uncertainty"
+    - "DINO"
+    - "DINO_uncertainty"
+    - "GREEN"
+    - "GREEN_uncertainty"
+    - "HAPTO"
+    - "HAPTO_uncertainty"
+    - "MICRO"
+    - "MICRO_uncertainty"
+    - "NANO"
+    - "NANO_uncertainty"
+    - "PICO"
+    - "PICO_uncertainty"
+    - "PROCHLO"
+    - "PROCHLO_uncertainty"
+    - "PROKAR"
+    - "PROKAR_uncertainty"
+    - "flags"
+    - "PP_uncertainty"
+    - "PP"
+    - "CDM"
+    - "BBP"
+
+web:
+  host: "0.0.0.0"
+  port: 5000
+  debug: true
