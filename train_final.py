@@ -1,3 +1,4 @@
+# File: final_test_fixed.py
 import pandas as pd
 import numpy as np
 import joblib
@@ -13,19 +14,18 @@ warnings.filterwarnings('ignore')
 
 def get_latest_processed_data():
     """Find the latest processed data file"""
-    processed_dirs = glob.glob('data/processed/marine_pollution_prediction_*')
-    if not processed_dirs:
+    processed_files = glob.glob('data/processed/marine_pollution_prediction_*/processed_data.joblib')
+    if not processed_files:
         raise FileNotFoundError("No processed data files found")
     
     # Sort by modification time (newest first)
-    processed_dirs.sort(key=os.path.getmtime, reverse=True)
-    latest_dir = processed_dirs[0]
-    processed_data_path = os.path.join(latest_dir, 'processed_data.joblib')
+    processed_files.sort(key=os.path.getmtime, reverse=True)
+    latest_file = processed_files[0]
     
-    if not os.path.exists(processed_data_path):
-        raise FileNotFoundError(f"Processed data file not found: {processed_data_path}")
+    if not os.path.exists(latest_file):
+        raise FileNotFoundError(f"Processed data file not found: {latest_file}")
     
-    return processed_data_path
+    return latest_file
 
 def train_final_model():
     """Train final model with optimized parameters"""
@@ -41,24 +41,52 @@ def train_final_model():
         # Load processed data
         data = joblib.load(data_path)
         
-        print("\nData structure:")
-        print(f"X_train shape: {data['X_train'].shape}")
-        print(f"y_train shape: {data['y_train'].shape}")
-        print(f"X_val shape: {data['X_val'].shape}")
-        print(f"y_val shape: {data['y_val'].shape}")
-        print(f"X_test shape: {data['X_test'].shape}")
-        print(f"y_test shape: {data['y_test'].shape}")
-        print(f"Number of features: {len(data['feature_names'])}")
-        print(f"Feature names: {data['feature_names']}")
+        print("\nAvailable keys in data:")
+        for key in data.keys():
+            print(f"  {key}: {type(data[key])}")
         
-        # Extract data
-        X_train = data['X_train']
-        y_train = data['y_train']
-        X_val = data['X_val']
-        y_val = data['y_val']
-        X_test = data['X_test']
-        y_test = data['y_test']
-        feature_names = data['feature_names']
+        # Check if data has 'splits' key (new format)
+        if 'splits' in data:
+            print("\nDetected new data format (using 'splits' key)")
+            splits = data['splits']
+            
+            # Extract data from splits
+            X_train = splits['X_train']
+            X_val = splits.get('X_val', None)
+            X_test = splits['X_test']
+            y_train = splits['y_train']
+            y_val = splits.get('y_val', None)
+            y_test = splits['y_test']
+            
+            # If no validation set, create one
+            if X_val is None:
+                print("No validation set found, using 20% of training for validation")
+                from sklearn.model_selection import train_test_split
+                X_train, X_val, y_train, y_val = train_test_split(
+                    X_train, y_train, test_size=0.2, random_state=42
+                )
+            
+            feature_names = data.get('feature_names', [f'feature_{i}' for i in range(X_train.shape[1])])
+            
+        else:
+            # Old format
+            print("\nDetected old data format")
+            X_train = data['X_train']
+            X_val = data['X_val']
+            X_test = data['X_test']
+            y_train = data['y_train']
+            y_val = data['y_val']
+            y_test = data['y_test']
+            feature_names = data['feature_names']
+        
+        print(f"\nX_train shape: {X_train.shape}")
+        print(f"y_train shape: {y_train.shape}")
+        print(f"X_val shape: {X_val.shape}")
+        print(f"y_val shape: {y_val.shape}")
+        print(f"X_test shape: {X_test.shape}")
+        print(f"y_test shape: {y_test.shape}")
+        print(f"Number of features: {len(feature_names)}")
+        print(f"First 10 feature names: {feature_names[:10]}")
         
         # Combine train and validation sets for final training
         print("\nCombining train and validation sets for final training...")
@@ -77,7 +105,7 @@ def train_final_model():
         
         # Train Random Forest with optimized parameters
         rf_model = RandomForestRegressor(
-            n_estimators=100,  # You can increase this for better performance
+            n_estimators=100,
             max_depth=20,
             min_samples_split=5,
             min_samples_leaf=2,
@@ -109,7 +137,7 @@ def train_final_model():
         print(f"R² Score: {r2:.4f}")
         
         # Also evaluate on train set for comparison
-        y_train_pred = rf_model.predict(X_train_scaled[:len(X_train)])  # Only on original train set
+        y_train_pred = rf_model.predict(scaler.transform(X_train))
         train_rmse = np.sqrt(mean_squared_error(y_train, y_train_pred))
         train_r2 = r2_score(y_train, y_train_pred)
         
@@ -254,10 +282,10 @@ def train_final_model():
         
     except FileNotFoundError as e:
         print(f"ERROR: {e}")
-        print("\nAvailable processed data directories:")
-        processed_dirs = glob.glob('data/processed/marine_pollution_prediction_*')
-        for dir in processed_dirs:
-            print(f"  {dir}")
+        print("\nAvailable processed data files:")
+        processed_files = glob.glob('data/processed/marine_pollution_prediction_*/processed_data.joblib')
+        for file in processed_files:
+            print(f"  {file}")
         sys.exit(1)
     except Exception as e:
         print(f"ERROR during training: {str(e)}")
