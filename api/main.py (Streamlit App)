@@ -1,0 +1,460 @@
+import streamlit as st
+import pandas as pd
+import numpy as np
+import plotly.express as px
+import plotly.graph_objects as go
+from datetime import datetime, timedelta
+import joblib
+import sys
+import os
+
+# Add src to path
+sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
+
+from src.predictor import PollutionPredictor
+from src.visualizer import PollutionVisualizer
+
+# Page configuration
+st.set_page_config(
+    page_title="Ocean Pollution AI Predictor",
+    page_icon="🌊",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# Custom CSS
+st.markdown("""
+<style>
+    .main-header {
+        font-size: 2.5rem;
+        color: #1E90FF;
+        text-align: center;
+        margin-bottom: 2rem;
+    }
+    .risk-high {
+        background-color: #FF6B6B;
+        padding: 10px;
+        border-radius: 5px;
+        color: white;
+    }
+    .risk-medium {
+        background-color: #FFD93D;
+        padding: 10px;
+        border-radius: 5px;
+        color: black;
+    }
+    .risk-low {
+        background-color: #6BCF7F;
+        padding: 10px;
+        border-radius: 5px;
+        color: white;
+    }
+    .metric-card {
+        background-color: #2D3748;
+        padding: 20px;
+        border-radius: 10px;
+        margin: 10px;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+class PollutionDashboard:
+    def __init__(self):
+        self.predictor = PollutionPredictor()
+        self.visualizer = PollutionVisualizer(style='dark')
+        self.initialize_session_state()
+    
+    def initialize_session_state(self):
+        """Initialize session state variables."""
+        if 'forecast_data' not in st.session_state:
+            st.session_state.forecast_data = None
+        if 'uploaded_data' not in st.session_state:
+            st.session_state.uploaded_data = None
+    
+    def render_header(self):
+        """Render page header."""
+        st.markdown('<h1 class="main-header">🌊 Ocean Pollution AI Predictor</h1>', 
+                   unsafe_allow_html=True)
+        st.markdown("""
+        <div style='text-align: center; margin-bottom: 2rem;'>
+            <p>Real-time ocean pollution monitoring and prediction using AI</p>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    def render_sidebar(self):
+        """Render sidebar controls."""
+        with st.sidebar:
+            st.header("📊 Control Panel")
+            
+            # Data upload
+            uploaded_file = st.file_uploader(
+                "Upload Ocean Data (CSV/Parquet)",
+                type=['csv', 'parquet']
+            )
+            
+            if uploaded_file is not None:
+                try:
+                    if uploaded_file.name.endswith('.csv'):
+                        data = pd.read_csv(uploaded_file)
+                    else:
+                        data = pd.read_parquet(uploaded_file)
+                    
+                    st.session_state.uploaded_data = data
+                    st.success(f"Data loaded: {len(data)} rows")
+                    
+                except Exception as e:
+                    st.error(f"Error loading file: {e}")
+            
+            # Analysis options
+            st.subheader("Analysis Options")
+            analysis_type = st.selectbox(
+                "Select Analysis Type",
+                ["Real-time Prediction", "Historical Analysis", 
+                 "7-Day Forecast", "Risk Assessment"]
+            )
+            
+            # Forecast days
+            forecast_days = st.slider(
+                "Forecast Days", 
+                min_value=1, max_value=30, value=7
+            )
+            
+            # Threshold adjustment
+            st.subheader("Threshold Settings")
+            chl_threshold = st.slider(
+                "Chlorophyll High Threshold (mg/m³)",
+                min_value=1.0, max_value=50.0, value=5.0, step=0.1
+            )
+            
+            # Action buttons
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("🚀 Run Analysis", use_container_width=True):
+                    return self.run_analysis(analysis_type, forecast_days)
+            
+            with col2:
+                if st.button("📥 Download Report", use_container_width=True):
+                    self.download_report()
+            
+            st.markdown("---")
+            st.info("💡 Upload your data or use sample data for analysis")
+    
+    def run_analysis(self, analysis_type: str, forecast_days: int):
+        """Run selected analysis."""
+        with st.spinner(f"Running {analysis_type}..."):
+            
+            if analysis_type == "Real-time Prediction":
+                self.show_real_time_prediction()
+            
+            elif analysis_type == "Historical Analysis":
+                self.show_historical_analysis()
+            
+            elif analysis_type == "7-Day Forecast":
+                self.show_forecast(forecast_days)
+            
+            elif analysis_type == "Risk Assessment":
+                self.show_risk_assessment()
+    
+    def show_real_time_prediction(self):
+        """Display real-time prediction results."""
+        st.header("🎯 Real-time Pollution Prediction")
+        
+        if st.session_state.uploaded_data is None:
+            st.warning("Please upload data first")
+            return
+        
+        # Make predictions
+        predictions = self.predictor.predict(st.session_state.uploaded_data)
+        
+        # Display summary
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            st.metric("Total Samples", len(predictions['predictions']))
+        
+        with col2:
+            high_risk = predictions['summary']['high_risk_count']
+            st.metric("High Risk Areas", high_risk)
+        
+        with col3:
+            avg_conf = predictions['summary']['average_confidence']
+            st.metric("Avg Confidence", f"{avg_conf:.2%}")
+        
+        with col4:
+            risk_assessment = predictions['summary']['risk_assessment']
+            st.metric("Risk Assessment", risk_assessment.split(' - ')[0])
+        
+        # Display predictions table
+        st.subheader("Detailed Predictions")
+        pred_df = pd.DataFrame(predictions['predictions'])
+        st.dataframe(pred_df, use_container_width=True)
+        
+        # Visualizations
+        st.subheader("Visualizations")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            # Prediction distribution
+            fig = px.pie(pred_df, names='prediction', 
+                        title='Prediction Distribution',
+                        color='prediction',
+                        color_discrete_map=self.visualizer.colors)
+            st.plotly_chart(fig, use_container_width=True)
+        
+        with col2:
+            # Confidence distribution
+            fig = px.histogram(pred_df, x='confidence',
+                             nbins=20,
+                             title='Confidence Distribution',
+                             color_discrete_sequence=['cyan'])
+            st.plotly_chart(fig, use_container_width=True)
+    
+    def show_forecast(self, days: int):
+        """Display forecast results."""
+        st.header(f"🔮 {days}-Day Pollution Forecast")
+        
+        if st.session_state.uploaded_data is None:
+            st.warning("Please upload historical data first")
+            return
+        
+        # Generate forecast
+        forecast_df = self.predictor.forecast_timeseries(
+            st.session_state.uploaded_data, days_ahead=days
+        )
+        
+        st.session_state.forecast_data = forecast_df
+        
+        # Display forecast
+        st.subheader("Forecast Results")
+        st.dataframe(forecast_df, use_container_width=True)
+        
+        # Plot forecast
+        fig = self.visualizer.plot_time_series_forecast(forecast_df)
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Risk timeline
+        st.subheader("Risk Timeline")
+        
+        timeline_data = []
+        for _, row in forecast_df.iterrows():
+            risk_color = {
+                'LOW': '🟢',
+                'MEDIUM': '🟡',
+                'HIGH': '🟠',
+                'CRITICAL': '🔴'
+            }.get(row['predicted_level'], '⚪')
+            
+            timeline_data.append({
+                'Date': row['date'],
+                'Risk': risk_color,
+                'Level': row['predicted_level'],
+                'Confidence': f"{row['confidence']:.2%}"
+            })
+        
+        timeline_df = pd.DataFrame(timeline_data)
+        st.table(timeline_df)
+        
+        # Download forecast
+        csv = forecast_df.to_csv(index=False)
+        st.download_button(
+            label="📥 Download Forecast CSV",
+            data=csv,
+            file_name=f"pollution_forecast_{datetime.now().strftime('%Y%m%d')}.csv",
+            mime="text/csv"
+        )
+    
+    def show_historical_analysis(self):
+        """Display historical analysis."""
+        st.header("📈 Historical Data Analysis")
+        
+        if st.session_state.uploaded_data is None:
+            st.warning("Please upload data first")
+            return
+        
+        data = st.session_state.uploaded_data
+        
+        # Basic statistics
+        st.subheader("Data Statistics")
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            st.metric("Total Samples", len(data))
+        
+        with col2:
+            st.metric("Features", len(data.columns))
+        
+        with col3:
+            st.metric("Missing Values", data.isnull().sum().sum())
+        
+        # Data preview
+        st.subheader("Data Preview")
+        st.dataframe(data.head(), use_container_width=True)
+        
+        # Visualizations
+        st.subheader("Data Visualizations")
+        
+        # Select columns for visualization
+        numeric_cols = data.select_dtypes(include=[np.number]).columns.tolist()
+        
+        if len(numeric_cols) >= 2:
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                x_col = st.selectbox("X-axis", numeric_cols, index=0)
+            
+            with col2:
+                y_col = st.selectbox("Y-axis", numeric_cols, 
+                                   index=min(1, len(numeric_cols)-1))
+            
+            # Scatter plot
+            fig = px.scatter(data, x=x_col, y=y_col,
+                           title=f"{x_col} vs {y_col}",
+                           color_discrete_sequence=['#1E90FF'])
+            st.plotly_chart(fig, use_container_width=True)
+        
+        # Correlation heatmap
+        st.subheader("Correlation Heatmap")
+        
+        if len(numeric_cols) > 1:
+            corr_matrix = data[numeric_cols].corr()
+            fig = px.imshow(corr_matrix,
+                          text_auto=True,
+                          aspect="auto",
+                          color_continuous_scale='RdBu',
+                          title="Feature Correlation Matrix")
+            st.plotly_chart(fig, use_container_width=True)
+    
+    def show_risk_assessment(self):
+        """Display risk assessment."""
+        st.header("⚠️ Comprehensive Risk Assessment")
+        
+        if (st.session_state.uploaded_data is None and 
+            st.session_state.forecast_data is None):
+            st.warning("Please upload data or generate forecast first")
+            return
+        
+        # Create risk assessment
+        risk_data = []
+        
+        if st.session_state.uploaded_data is not None:
+            predictions = self.predictor.predict(st.session_state.uploaded_data)
+            high_risk_pct = (predictions['summary']['high_risk_count'] / 
+                           predictions['summary']['total_samples'])
+            
+            risk_data.append({
+                'Type': 'Current',
+                'Risk Level': self._assess_risk_level(high_risk_pct),
+                'High Risk %': f"{high_risk_pct:.2%}",
+                'Samples': predictions['summary']['total_samples']
+            })
+        
+        if st.session_state.forecast_data is not None:
+            forecast_high = sum(1 for _, row in st.session_state.forecast_data.iterrows()
+                              if row['predicted_level'] in ['HIGH', 'CRITICAL'])
+            forecast_pct = forecast_high / len(st.session_state.forecast_data)
+            
+            risk_data.append({
+                'Type': 'Forecast',
+                'Risk Level': self._assess_risk_level(forecast_pct),
+                'High Risk %': f"{forecast_pct:.2%}",
+                'Samples': len(st.session_state.forecast_data)
+            })
+        
+        risk_df = pd.DataFrame(risk_data)
+        st.dataframe(risk_df, use_container_width=True)
+        
+        # Recommendations
+        st.subheader("🎯 Recommendations")
+        
+        if len(risk_data) > 0:
+            highest_risk = max(risk_data, key=lambda x: float(x['High Risk %'][:-1]))
+            
+            if float(highest_risk['High Risk %'][:-1]) > 30:
+                st.error("""
+                **🚨 CRITICAL ACTION REQUIRED**
+                - Immediate containment measures needed
+                - Alert relevant authorities
+                - Deploy emergency monitoring
+                - Restrict marine activities
+                """)
+            elif float(highest_risk['High Risk %'][:-1]) > 10:
+                st.warning("""
+                **⚠️ HIGH RISK DETECTED**
+                - Increase monitoring frequency
+                - Investigate pollution sources
+                - Prepare contingency plans
+                - Public awareness campaign
+                """)
+            else:
+                st.success("""
+                **✅ RISK LEVEL ACCEPTABLE**
+                - Continue regular monitoring
+                - Maintain current protocols
+                - Periodic review recommended
+                """)
+    
+    def _assess_risk_level(self, high_risk_pct: float) -> str:
+        """Assess risk level based on percentage."""
+        if high_risk_pct > 0.3:
+            return "CRITICAL"
+        elif high_risk_pct > 0.1:
+            return "HIGH"
+        elif high_risk_pct > 0.05:
+            return "MEDIUM"
+        else:
+            return "LOW"
+    
+    def download_report(self):
+        """Generate and download comprehensive report."""
+        # This would generate a PDF report
+        st.info("Report generation feature coming soon!")
+    
+    def render_footer(self):
+        """Render page footer."""
+        st.markdown("---")
+        st.markdown("""
+        <div style='text-align: center; color: #666; padding: 20px;'>
+            <p>🌊 Ocean Pollution AI Predictor v1.0</p>
+            <p>Powered by Machine Learning & Satellite Data</p>
+            <p>© 2024 AI Ocean Monitoring System</p>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    def run(self):
+        """Main application runner."""
+        self.render_header()
+        self.render_sidebar()
+        
+        # Main content area
+        if st.session_state.uploaded_data is not None:
+            tab1, tab2, tab3, tab4 = st.tabs([
+                "📊 Dashboard", 
+                "🗺️ Map View", 
+                "📈 Analytics", 
+                "⚙️ Settings"
+            ])
+            
+            with tab1:
+                self.show_real_time_prediction()
+            
+            with tab2:
+                st.header("Geospatial Analysis")
+                st.info("Map visualization coming soon!")
+            
+            with tab3:
+                self.show_historical_analysis()
+            
+            with tab4:
+                st.header("Model Settings")
+                st.json(self.predictor.metadata)
+        
+        self.render_footer()
+
+def main():
+    """Main entry point."""
+    app = PollutionDashboard()
+    app.run()
+
+if __name__ == "__main__":
+    main()
