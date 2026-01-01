@@ -1,4 +1,3 @@
-همرو توو یه تاپیک بنویس بفهمم از کجا تا کجاست
 🌊 AI Ocean Water Pollution Prediction System - Complete Project Description
 📋 PROJECT OVERVIEW
 A production-ready machine learning system that predicts ocean pollution levels with 95.18% accuracy using satellite data from CMEMS Copernicus Marine Service. Complete end-to-end pipeline from data acquisition to interactive dashboard deployment.
