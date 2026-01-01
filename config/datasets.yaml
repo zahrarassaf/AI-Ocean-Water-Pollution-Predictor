@@ -1,0 +1,51 @@
+datasets:
+  sample:
+    base_url: "https://github.com/yourusername/oceanpredict-data/raw/main/sample/"
+    files:
+      currents: "sample_currents.nc"
+      pp: "sample_pp.nc"
+      chl: "sample_chl.nc"
+  
+  full:
+    storage: "google_drive"
+    files:
+      currents:
+        url: "https://drive.google.com/uc?id=YOUR_CURRENTS_FILE_ID"
+        size_gb: 2.1
+        description: "Ocean current velocities (u, v components)"
+      
+      primary_productivity:
+        url: "https://drive.google.com/uc?id=YOUR_PP_FILE_ID"
+        size_gb: 1.8
+        description: "Net primary productivity"
+      
+      chlorophyll:
+        url: "https://drive.google.com/uc?id=YOUR_CHL_FILE_ID"
+        size_gb: 1.5
+        description: "Chlorophyll concentration"
+      
+      kd490:
+        url: "https://drive.google.com/uc?id=YOUR_KD490_FILE_ID"
+        size_gb: 1.2
+        description: "Diffuse attenuation coefficient at 490nm"
+      
+      zsd:
+        url: "https://drive.google.com/uc?id=YOUR_ZSD_FILE_ID"
+        size_gb: 1.2
+        description: "Secchi depth"
+      
+      bbp:
+        url: "https://drive.google.com/uc?id=YOUR_BBP_FILE_ID"
+        size_gb: 1.0
+        description: "Particulate backscattering coefficient"
+      
+      cdom:
+        url: "https://drive.google.com/uc?id=YOUR_CDOM_FILE_ID"
+        size_gb: 1.0
+        description: "Colored dissolved organic matter"
+
+  organization:
+    physics_currents: ["currents"]
+    bgc_pp: ["primary_productivity"]
+    bgc_plankton: ["chlorophyll"]
+    bgc_optics: ["kd490", "zsd", "bbp", "cdom"]
