@@ -1,0 +1,396 @@
+"""
+Run Ocean Pollution Prediction with Time Series Features
+Simple integration of real-time and time-series prediction
+"""
+
+import sys
+import os
+import pandas as pd
+import numpy as np
+from datetime import datetime, timedelta
+
+# Add current directory to Python path
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+def load_real_data():
+    """
+    Load real NetCDF data or create sample if not available
+    Returns: DataFrame with chlorophyll data
+    """
+    try:
+        # Try to load from your NetCDF files
+        import xarray as xr
+        
+        # Check for your NetCDF files
+        data_dir = "data/raw"
+        if os.path.exists(data_dir):
+            nc_files = [f for f in os.listdir(data_dir) if f.endswith('.nc')]
+            if nc_files:
+                # Use the chlorophyll file
+                chl_file = None
+                for f in nc_files:
+                    if 'chlorophyll' in f.lower():
+                        chl_file = os.path.join(data_dir, f)
+                        break
+                
+                if chl_file:
+                    print(f"📊 Loading real data from: {os.path.basename(chl_file)}")
+                    ds = xr.open_dataset(chl_file)
+                    
+                    # Try to find chlorophyll variable
+                    chl_vars = [var for var in ds.variables if 'CHL' in var.upper() or 'chlorophyll' in var.lower()]
+                    if chl_vars:
+                        chl_var = chl_vars[0]
+                        chl_data = ds[chl_var].values.flatten()
+                        ds.close()
+                        
+                        # Remove NaN values
+                        chl_data = chl_data[~np.isnan(chl_data)]
+                        
+                        if len(chl_data) > 0:
+                            # Create time series from data
+                            dates = pd.date_range(
+                                start='2024-01-01', 
+                                periods=len(chl_data), 
+                                freq='D'
+                            )
+                            
+                            df = pd.DataFrame({
+                                'date': dates,
+                                'chlorophyll': chl_data[:len(dates)]  # Trim to match dates
+                            })
+                            return df
+    except ImportError:
+        print("xarray not available, using sample data")
+    except Exception as e:
+        print(f"Error loading real data: {e}")
+    
+    # Create sample data if real data not available
+    print("📊 Creating sample time series data...")
+    dates = pd.date_range(start='2024-01-01', periods=100, freq='D')
+    
+    data = []
+    for i, date in enumerate(dates):
+        # Realistic pattern with seasonality and trend
+        seasonal = 0.8 * np.sin(2 * np.pi * i / 30)  # Monthly cycle
+        weekly = 0.3 * np.sin(2 * np.pi * i / 7)     # Weekly cycle
+        trend = i * 0.02  # Slight upward trend
+        noise = np.random.normal(0, 0.15)
+        
+        chl = max(0.1, 1.5 + seasonal + weekly + trend + noise)
+        
+        data.append({
+            'date': date,
+            'chlorophyll': round(chl, 3),
+            'productivity': round(chl * 75, 1),
+            'transparency': round(max(1.0, 28 - chl * 2.5), 1)
+        })
+    
+    df = pd.DataFrame(data)
+    return df
+
+def simple_time_series_forecast(data, days=7):
+    """
+    Simple time series forecasting using moving average
+    """
+    if len(data) < 3:
+        return [data[-1]] * days if data else [1.0] * days
+    
+    # Use weighted moving average
+    weights = np.arange(1, len(data) + 1)
+    weights = weights / weights.sum()
+    
+    predictions = []
+    window = data.copy()
+    
+    for _ in range(days):
+        # Weighted average of recent data
+        pred = np.average(window[-7:], weights=weights[-7:])
+        
+        # Add some randomness based on historical variance
+        variance = np.var(window[-14:]) if len(window) >= 14 else 0.1
+        pred += np.random.normal(0, np.sqrt(variance) * 0.3)
+        
+        pred = max(0.1, pred)  # Ensure positive
+        predictions.append(pred)
+        window.append(pred)
+    
+    return predictions[-days:]
+
+def analyze_trend(data, window=10):
+    """Analyze trend of recent data"""
+    if len(data) < window:
+        return "insufficient_data"
+    
+    recent = data[-window:]
+    x = np.arange(len(recent))
+    
+    try:
+        slope = np.polyfit(x, recent, 1)[0]
+        
+        if abs(slope) < 0.01:
+            return "stable"
+        elif slope > 0:
+            return "increasing"
+        else:
+            return "decreasing"
+    except:
+        return "unknown"
+
+def pollution_level(chl_value):
+    """Determine pollution level based on chlorophyll"""
+    if chl_value <= 1.0:
+        return "LOW", "🟢 Clean"
+    elif chl_value <= 5.0:
+        return "MEDIUM", "🟡 Moderate"
+    else:
+        return "HIGH", "🔴 Polluted"
+
+def run_real_time_prediction():
+    """Run the main real-time prediction system"""
+    print("\n" + "="*70)
+    print("REAL-TIME POLLUTION PREDICTION")
+    print("="*70)
+    
+    try:
+        # Import your main predictor
+        from predict import OceanPollutionPredictor
+        
+        predictor = OceanPollutionPredictor(auto_train=False)
+        
+        if not predictor.model:
+            print("Using default prediction thresholds")
+        
+        # Demo predictions
+        test_cases = [
+            (0.3, 45, 32),
+            (1.2, 90, 27),
+            (2.8, 220, 18),
+            (4.5, 360, 9),
+            (7.2, 580, 4),
+            (12.0, 960, 2)
+        ]
+        
+        locations = [
+            "Open Ocean",
+            "Clean Coast",
+            "Coastal Bay", 
+            "River Estuary",
+            "Port Area",
+            "Industrial Zone"
+        ]
+        
+        for i, ((chl, pp, trans), location) in enumerate(zip(test_cases, locations)):
+            result = predictor.predict(chl, pp, trans)
+            
+            if result:
+                print(f"\n📍 {location}:")
+                print(f"   Chlorophyll: {chl} mg/m³")
+                print(f"   Prediction: {result['level_name']}")
+                print(f"   Confidence: {result['confidence']:.1%}")
+                print(f"   Status: {result['recommendation']}")
+            else:
+                # Fallback
+                level, desc = pollution_level(chl)
+                print(f"\n📍 {location}:")
+                print(f"   Chlorophyll: {chl} mg/m³")
+                print(f"   Prediction: {level} ({desc})")
+        
+        return predictor
+        
+    except ImportError:
+        print("predict.py not found, using simple prediction")
+        return None
+    except Exception as e:
+        print(f"Error in real-time prediction: {e}")
+        return None
+
+def run_time_series_analysis(data_df, forecast_days=7):
+    """Run time series analysis and forecasting"""
+    print("\n" + "="*70)
+    print("TIME SERIES ANALYSIS & FORECASTING")
+    print("="*70)
+    
+    chl_data = data_df['chlorophyll'].tolist()
+    
+    print(f"\n📈 Historical Data Summary:")
+    print(f"   Period: {len(chl_data)} days")
+    print(f"   Current: {chl_data[-1]:.2f} mg/m³")
+    print(f"   Average: {np.mean(chl_data):.2f} mg/m³")
+    print(f"   Maximum: {np.max(chl_data):.2f} mg/m³")
+    print(f"   Minimum: {np.min(chl_data):.2f} mg/m³")
+    
+    # Trend analysis
+    trend = analyze_trend(chl_data, window=14)
+    print(f"\n📊 Trend Analysis:")
+    print(f"   Recent trend: {trend.upper()}")
+    
+    # Forecast
+    print(f"\n🔮 {forecast_days}-Day Forecast:")
+    print("-"*45)
+    
+    forecasts = simple_time_series_forecast(chl_data, days=forecast_days)
+    last_date = data_df['date'].iloc[-1]
+    
+    for i, pred in enumerate(forecasts, 1):
+        forecast_date = last_date + timedelta(days=i)
+        date_str = forecast_date.strftime('%Y-%m-%d')
+        level, desc = pollution_level(pred)
+        
+        print(f"   {date_str}: {pred:.2f} mg/m³ - {level} ({desc})")
+    
+    # Save forecasts
+    forecast_dates = [last_date + timedelta(days=i) for i in range(1, forecast_days + 1)]
+    forecast_df = pd.DataFrame({
+        'date': forecast_dates,
+        'chlorophyll_forecast': forecasts,
+        'trend': trend
+    })
+    
+    # Add pollution levels
+    forecast_df['pollution_level'] = forecast_df['chlorophyll_forecast'].apply(
+        lambda x: pollution_level(x)[0]
+    )
+    
+    forecast_file = f"pollution_forecast_{datetime.now().strftime('%Y%m%d')}.csv"
+    forecast_df.to_csv(forecast_file, index=False)
+    
+    print(f"\n💾 Forecast saved to: {forecast_file}")
+    
+    return forecast_df
+
+def generate_report(real_time_results, time_series_results, data_df):
+    """Generate a comprehensive report"""
+    print("\n" + "="*70)
+    print("COMPREHENSIVE POLLUTION REPORT")
+    print("="*70)
+    
+    report = {
+        'generated_at': datetime.now().isoformat(),
+        'data_points': len(data_df),
+        'current_chlorophyll': float(data_df['chlorophyll'].iloc[-1]),
+        'historical_average': float(np.mean(data_df['chlorophyll'])),
+        'forecast_days': len(time_series_results) if time_series_results is not None else 0,
+        'alerts': []
+    }
+    
+    # Check for high pollution
+    current_level = pollution_level(data_df['chlorophyll'].iloc[-1])[0]
+    if current_level == "HIGH":
+        report['alerts'].append({
+            'type': 'current_high_pollution',
+            'severity': 'critical',
+            'message': f'Current chlorophyll level ({data_df["chlorophyll"].iloc[-1]:.2f} mg/m³) indicates HIGH pollution'
+        })
+    
+    # Check forecast for high pollution
+    if time_series_results is not None:
+        high_forecast_days = time_series_results[
+            time_series_results['pollution_level'] == 'HIGH'
+        ]
+        
+        if len(high_forecast_days) > 0:
+            report['alerts'].append({
+                'type': 'future_high_pollution',
+                'severity': 'warning',
+                'message': f'High pollution forecast for {len(high_forecast_days)} days'
+            })
+    
+    print("\n📋 Report Summary:")
+    print(f"   Data analyzed: {report['data_points']} days")
+    print(f"   Current level: {current_level}")
+    print(f"   Alerts: {len(report['alerts'])}")
+    
+    if report['alerts']:
+        print("\n🚨 ALERTS:")
+        for alert in report['alerts']:
+            print(f"   ⚠️ {alert['message']}")
+    
+    # Save report
+    import json
+    report_file = f"pollution_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    with open(report_file, 'w') as f:
+        json.dump(report, f, indent=2)
+    
+    print(f"\n📄 Full report saved to: {report_file}")
+    
+    return report
+
+def main():
+    print("="*70)
+    print("🌊 OCEAN POLLUTION PREDICTION SYSTEM WITH TIME SERIES")
+    print("="*70)
+    print("Integrating real-time prediction with historical trend analysis")
+    
+    # Step 1: Load data
+    print("\n" + "="*70)
+    print("STEP 1: DATA LOADING")
+    print("="*70)
+    
+    data_df = load_real_data()
+    print(f"✅ Loaded {len(data_df)} days of chlorophyll data")
+    
+    # Step 2: Run real-time predictions
+    print("\n" + "="*70)
+    print("STEP 2: REAL-TIME PREDICTION")
+    print("="*70)
+    
+    predictor = run_real_time_prediction()
+    
+    # Step 3: Time series analysis
+    print("\n" + "="*70)
+    print("STEP 3: TIME SERIES ANALYSIS")
+    print("="*70)
+    
+    forecast_days = 7
+    forecast_df = run_time_series_analysis(data_df, forecast_days)
+    
+    # Step 4: Generate comprehensive report
+    print("\n" + "="*70)
+    print("STEP 4: COMPREHENSIVE REPORT")
+    print("="*70)
+    
+    report = generate_report(predictor, forecast_df, data_df)
+    
+    # Step 5: Recommendations
+    print("\n" + "="*70)
+    print("STEP 5: RECOMMENDATIONS")
+    print("="*70)
+    
+    print("\n📋 Based on analysis:")
+    
+    current_chl = data_df['chlorophyll'].iloc[-1]
+    if current_chl <= 1.0:
+        print("   ✅ Current conditions: EXCELLENT")
+        print("   👉 Continue regular monitoring")
+    elif current_chl <= 3.0:
+        print("   ⚠️ Current conditions: NORMAL")
+        print("   👉 Maintain current monitoring schedule")
+    elif current_chl <= 5.0:
+        print("   ⚠️ Current conditions: ELEVATED")
+        print("   👉 Increase monitoring frequency")
+    else:
+        print("   🚨 Current conditions: CRITICAL")
+        print("   👉 Immediate investigation required")
+    
+    # Check forecast trend
+    if 'trend' in forecast_df.columns and len(forecast_df) > 0:
+        trend = forecast_df['trend'].iloc[0]
+        if trend == "increasing":
+            print("\n   📈 Trend: INCREASING pollution levels")
+            print("   👉 Prepare for potential deterioration")
+        elif trend == "decreasing":
+            print("\n   📉 Trend: DECREASING pollution levels")
+            print("   👉 Conditions expected to improve")
+    
+    print("\n" + "="*70)
+    print("ANALYSIS COMPLETE")
+    print("="*70)
+    print("\nGenerated files:")
+    print(f"   1. pollution_forecast_YYYYMMDD.csv")
+    print(f"   2. pollution_report_YYYYMMDD_HHMMSS.json")
+    print("\nTo run again:")
+    print("   python run_with_timeseries.py")
+
+if __name__ == "__main__":
+    main()
