@@ -11,7 +11,8 @@ import xarray as xr
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import train_test_split, cross_val_score
-from sklearn.metrics import accuracy_score, classification_report
+from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
+from sklearn.cluster import KMeans
 warnings.filterwarnings('ignore')
 
 class OceanPollutionPredictor:
@@ -22,9 +23,9 @@ class OceanPollutionPredictor:
         self.classes = ['LOW', 'MEDIUM', 'HIGH']
         self.data_path = data_path
         self.datasets = {}
+        self.feature_statistics = {}
     
     def _remove_duplicates(self, features_list):
-        """Remove duplicate features while preserving order"""
         unique_features = []
         seen = set()
         for feat in features_list:
@@ -32,6 +33,17 @@ class OceanPollutionPredictor:
                 unique_features.append(feat)
                 seen.add(feat)
         return unique_features
+    
+    def _calculate_feature_statistics(self, X, feature_names):
+        for i, feat in enumerate(feature_names):
+            if feat not in self.feature_statistics:
+                self.feature_statistics[feat] = {
+                    'mean': np.mean(X[:, i]) if X.shape[0] > 0 else 0,
+                    'std': np.std(X[:, i]) if X.shape[0] > 0 else 1,
+                    'min': np.min(X[:, i]) if X.shape[0] > 0 else 0,
+                    'max': np.max(X[:, i]) if X.shape[0] > 0 else 1,
+                    'median': np.median(X[:, i]) if X.shape[0] > 0 else 0
+                }
     
     def load_datasets(self):
         try:
@@ -53,6 +65,29 @@ class OceanPollutionPredictor:
             return bool(self.datasets)
         except:
             return False
+    
+    def create_pollution_index(self, X, feature_names):
+        pollution_score = np.zeros(X.shape[0])
+        
+        pollution_indicators = {
+            'CHL': 0.30,
+            'KD490': 0.20,
+            'CDM': 0.15,
+            'BBP': 0.15,
+            'PP': 0.10,
+            'DIATO': 0.05,
+            'DINO': 0.05,
+        }
+        
+        for indicator, weight in pollution_indicators.items():
+            if indicator in feature_names:
+                idx = feature_names.index(indicator)
+                data = X[:, idx]
+                if np.max(data) > np.min(data):
+                    norm_data = (data - np.min(data)) / (np.max(data) - np.min(data))
+                    pollution_score += norm_data * weight
+        
+        return pollution_score
     
     def create_dataset(self, sample_limit=100000):
         try:
@@ -98,10 +133,9 @@ class OceanPollutionPredictor:
                     'chl_value': chl_flat[idx]
                 })
             
-            # Track added features to avoid duplicates
             feature_data = {'CHL': np.array([p['chl_value'] for p in sampled_points])}
             feature_names = ['CHL']
-            added_features = set(['CHL'])  # Track what we've already added
+            added_features = set(['CHL'])
             
             for filename, ds in self.datasets.items():
                 print(f"Extracting variables from: {filename}")
@@ -110,12 +144,10 @@ class OceanPollutionPredictor:
                     if var_name.lower() in ['time', 'latitude', 'longitude', 'lat', 'lon']:
                         continue
                     
-                    # Skip if already added from another file
                     if var_name in added_features:
                         print(f"  Skipped: {var_name} (already exists)")
                         continue
                     
-                    # Skip CHL from reference dataset (already added)
                     if var_name == 'CHL' and filename == reference_filename:
                         continue
                     
@@ -144,7 +176,6 @@ class OceanPollutionPredictor:
                             median_val = np.nanmedian(var_array)
                             var_array[np.isnan(var_array)] = median_val
                             
-                            # Add to features
                             feature_data[var_name] = var_array
                             feature_names.append(var_name)
                             added_features.add(var_name)
@@ -154,7 +185,6 @@ class OceanPollutionPredictor:
                         print(f"  Error extracting {var_name}: {e}")
                         continue
             
-            # Create feature matrix
             X_list = []
             final_features = []
             
@@ -165,30 +195,37 @@ class OceanPollutionPredictor:
             
             X = np.column_stack(X_list)
             
-            # Find CHL index
-            try:
-                chl_idx = final_features.index('CHL')
-                chl_values = X[:, chl_idx]
-            except ValueError:
-                print("Warning: CHL not found in final features, using first column")
-                chl_values = X[:, 0]
+            self._calculate_feature_statistics(X, final_features)
             
-            # Create labels
-            y = np.zeros(len(chl_values))
-            y[chl_values > 5.0] = 2
-            y[(chl_values > 1.0) & (chl_values <= 5.0)] = 1
+            print("\nCreating pollution labels using multiple indicators...")
+            pollution_score = self.create_pollution_index(X, final_features)
             
-            # Close datasets
+            low_threshold = np.percentile(pollution_score, 33)
+            medium_threshold = np.percentile(pollution_score, 66)
+            
+            y = np.zeros(len(pollution_score))
+            y[pollution_score > medium_threshold] = 2
+            y[(pollution_score > low_threshold) & (pollution_score <= medium_threshold)] = 1
+            
+            print(f"\nPollution Label Distribution:")
+            print(f"  LOW: {np.sum(y == 0):,} samples")
+            print(f"  MEDIUM: {np.sum(y == 1):,} samples")
+            print(f"  HIGH: {np.sum(y == 2):,} samples")
+            
+            chl_idx = final_features.index('CHL') if 'CHL' in final_features else 0
+            chl_values = X[:, chl_idx]
+            chl_corr = np.corrcoef(chl_values, y)[0, 1]
+            print(f"  Correlation with CHL: {chl_corr:.3f}")
+            
             for ds in self.datasets.values():
                 ds.close()
             
-            # Remove any remaining duplicates
             final_features = self._remove_duplicates(final_features)
             
-            print(f"\n✅ Dataset created:")
-            print(f"  Samples: {X.shape[0]}")
-            print(f"  Features: {len(final_features)} (unique)")
-            print(f"  Features list: {final_features[:10]}{'...' if len(final_features) > 10 else ''}")
+            print(f"\nDataset created:")
+            print(f"  Samples: {X.shape[0]:,}")
+            print(f"  Features: {len(final_features)}")
+            print(f"  Pollution score range: {pollution_score.min():.3f} to {pollution_score.max():.3f}")
             
             return X, y, final_features
             
@@ -207,55 +244,90 @@ class OceanPollutionPredictor:
             if X is None:
                 return False
             
-            # Ensure no duplicates
             self.features = self._remove_duplicates(feature_names)
+            
+            print(f"\nClass distribution:")
+            unique, counts = np.unique(y, return_counts=True)
+            for cls, count in zip(unique, counts):
+                print(f"  Class {self.classes[int(cls)]}: {count:,} samples ({count/len(y)*100:.1f}%)")
             
             X_train, X_test, y_train, y_test = train_test_split(
                 X, y, test_size=0.2, random_state=42, stratify=y
             )
             
+            print(f"\nData split:")
+            print(f"  Training samples: {X_train.shape[0]:,}")
+            print(f"  Testing samples: {X_test.shape[0]:,}")
+            
             self.scaler = StandardScaler()
             X_train_scaled = self.scaler.fit_transform(X_train)
             X_test_scaled = self.scaler.transform(X_test)
             
+            n_estimators = min(200, X_train.shape[0] // 100)
+            n_estimators = max(50, n_estimators)
+            
             self.model = RandomForestClassifier(
-                n_estimators=200,
+                n_estimators=n_estimators,
                 max_depth=15,
                 min_samples_split=5,
                 min_samples_leaf=2,
                 random_state=42,
                 n_jobs=-1,
                 class_weight='balanced',
-                oob_score=True
+                oob_score=True,
+                max_features='sqrt'
             )
             
-            print("\nTraining Random Forest model...")
+            print(f"\nTraining Random Forest model...")
+            print(f"  Number of trees: {n_estimators}")
             self.model.fit(X_train_scaled, y_train)
             
-            y_pred = self.model.predict(X_test_scaled)
-            accuracy = accuracy_score(y_test, y_pred)
+            y_pred_train = self.model.predict(X_train_scaled)
+            y_pred_test = self.model.predict(X_test_scaled)
+            
+            train_accuracy = accuracy_score(y_train, y_pred_train)
+            test_accuracy = accuracy_score(y_test, y_pred_test)
             
             cv_scores = cross_val_score(self.model, X_train_scaled, y_train, cv=5, n_jobs=-1)
             
-            print(f"\n📊 Model Evaluation:")
-            print(f"Test Accuracy: {accuracy:.4f}")
-            print(f"Test Samples: {len(y_test)}")
-            print(f"CV Mean Score: {cv_scores.mean():.4f}")
+            print(f"\nModel Evaluation:")
+            print(f"  Training Accuracy: {train_accuracy:.4f}")
+            print(f"  Test Accuracy: {test_accuracy:.4f}")
+            print(f"  Test Samples: {len(y_test):,}")
+            print(f"  CV Mean Score: {cv_scores.mean():.4f} (±{cv_scores.std():.4f})")
             
             if hasattr(self.model, 'oob_score_'):
-                print(f"OOB Score: {self.model.oob_score_:.4f}")
+                print(f"  OOB Score: {self.model.oob_score_:.4f}")
             
-            print("\n📋 Classification Report:")
-            print(classification_report(y_test, y_pred, target_names=self.classes))
+            print("\nClassification Report (Test Set):")
+            print(classification_report(y_test, y_pred_test, target_names=self.classes))
+            
+            cm = confusion_matrix(y_test, y_pred_test)
+            print(f"\nConfusion Matrix:")
+            print(f"           Predicted")
+            print(f"           LOW  MEDIUM HIGH")
+            for i, actual in enumerate(self.classes):
+                row = f"Actual {actual:6s}"
+                for j in range(3):
+                    row += f" {cm[i, j]:6d}"
+                print(row)
             
             importances = self.model.feature_importances_
             indices = np.argsort(importances)[::-1]
             
-            print("\n⭐ Top 10 Feature Importance:")
-            for i, idx in enumerate(indices[:10]):
-                print(f"  {i+1:2d}. {self.features[idx]}: {importances[idx]:.4f}")
+            print(f"\nTop 15 Feature Importance:")
+            for i, idx in enumerate(indices[:15]):
+                print(f"  {i+1:2d}. {self.features[idx]:25s}: {importances[idx]:.4f}")
             
-            self._save_model(accuracy, cv_scores.mean(), X.shape[0])
+            overfitting_warning = ""
+            if train_accuracy - test_accuracy > 0.05:
+                overfitting_warning = " Possible overfitting detected!"
+            
+            print(f"\nOverfitting Check:{overfitting_warning}")
+            print(f"  Train-Test Difference: {(train_accuracy - test_accuracy):.4f}")
+            
+            self._save_model(test_accuracy, cv_scores.mean(), X.shape[0])
+            self._save_feature_statistics()
             
             return True
             
@@ -263,6 +335,24 @@ class OceanPollutionPredictor:
             print(f"Training error: {e}")
             traceback.print_exc()
             return False
+    
+    def _save_feature_statistics(self):
+        if self.feature_statistics:
+            import json
+            stats_path = 'models/feature_statistics.json'
+            with open(stats_path, 'w') as f:
+                stats_dict = {}
+                for feat, stats in self.feature_statistics.items():
+                    stats_dict[feat] = {k: float(v) for k, v in stats.items()}
+                json.dump(stats_dict, f, indent=2)
+            print(f"  Feature statistics saved to {stats_path}")
+    
+    def _load_feature_statistics(self):
+        stats_path = 'models/feature_statistics.json'
+        if os.path.exists(stats_path):
+            import json
+            with open(stats_path, 'r') as f:
+                self.feature_statistics = json.load(f)
     
     def _save_model(self, accuracy, cv_score, sample_count):
         os.makedirs('models', exist_ok=True)
@@ -277,60 +367,76 @@ class OceanPollutionPredictor:
         metadata = {
             'training_date': datetime.now().isoformat(),
             'features': self.features,
-            'unique_features': True,
             'feature_count': len(self.features),
             'accuracy': float(accuracy),
             'cv_score': float(cv_score),
-            'samples': int(sample_count)
+            'samples': int(sample_count),
+            'classes': self.classes
         }
         
         import json
         with open('models/metadata.json', 'w') as f:
             json.dump(metadata, f, indent=2)
         
-        print(f"\n💾 Model saved to models/ directory")
-        print(f"   Features: {len(self.features)} unique variables")
-        print(f"   Accuracy: {accuracy:.4f}")
+        print(f"\nModel saved to models/ directory")
+        print(f"  Features: {len(self.features)} variables")
+        print(f"  Accuracy: {accuracy:.4f}")
+        print(f"  Samples: {sample_count:,}")
     
     def load_model(self):
         try:
             self.model = joblib.load('models/ocean_model.pkl')
             self.scaler = joblib.load('models/ocean_scaler.pkl')
             
-            # Load features and remove duplicates
             with open('models/features.txt', 'r') as f:
                 features = [line.strip() for line in f.readlines()]
             
             self.features = self._remove_duplicates(features)
             
-            print(f"✅ Model loaded with {len(self.features)} unique features")
+            self._load_feature_statistics()
             
-            # Load metadata if exists
+            print(f"Model loaded with {len(self.features)} features")
+            
             if os.path.exists('models/metadata.json'):
                 import json
                 with open('models/metadata.json', 'r') as f:
                     metadata = json.load(f)
-                    print(f"   Accuracy: {metadata.get('accuracy', 'N/A')}")
-                    print(f"   Samples: {metadata.get('samples', 'N/A')}")
-                    print(f"   Features: {metadata.get('feature_count', len(self.features))}")
+                    print(f"  Accuracy: {metadata.get('accuracy', 'N/A'):.4f}")
+                    print(f"  Samples: {metadata.get('samples', 'N/A'):,}")
             
             return True
         except Exception as e:
-            print(f"❌ Error loading model: {e}")
+            print(f"Error loading model: {e}")
+            traceback.print_exc()
             return False
     
     def predict(self, input_values):
         try:
-            # Check for chlorophyll
-            has_chl = any('CHL' in key.upper() for key in input_values.keys())
-            if not has_chl:
-                return {'error': 'Chlorophyll (CHL) value is required'}
+            chl_value = None
             
-            # Prepare input with all required features
+            for key, value in input_values.items():
+                if 'CHL' in key.upper() and 'UNCERTAINTY' not in key.upper():
+                    try:
+                        chl_value = float(value)
+                        break
+                    except:
+                        continue
+            
+            if chl_value is None:
+                for key, value in input_values.items():
+                    if 'CHL' in key.upper():
+                        try:
+                            chl_value = float(value)
+                            break
+                        except:
+                            continue
+            
+            if chl_value is None:
+                return {'error': 'CHL value is required'}
+            
             prepared = {}
             
             for feature in self.features:
-                # Try to find matching input (case insensitive)
                 matched = False
                 for input_key, input_val in input_values.items():
                     if feature.upper() == input_key.upper():
@@ -341,54 +447,57 @@ class OceanPollutionPredictor:
                         except:
                             continue
                 
-                # If not provided, use reasonable default
                 if not matched:
-                    feature_upper = feature.upper()
-                    if 'CHL' in feature_upper:
-                        prepared[feature] = 1.0  # Default chlorophyll
-                    elif feature == 'PP':
-                        prepared[feature] = 300.0  # Default primary productivity
-                    elif 'KD' in feature_upper:
-                        prepared[feature] = 0.1  # Default diffuse attenuation
-                    elif any(phyto in feature_upper for phyto in ['DIATO', 'DINO', 'GREEN', 'HAPTO', 'MICRO', 'NANO', 'PICO']):
-                        prepared[feature] = 0.01  # Default phytoplankton
-                    elif 'UNCERTAINTY' in feature_upper:
-                        prepared[feature] = 0.1  # Default uncertainty
-                    elif feature == 'CDM':
-                        prepared[feature] = 0.02  # Default CDM
-                    elif feature == 'BBP':
-                        prepared[feature] = 0.003  # Default BBP
-                    elif feature == 'FLAGS':
-                        prepared[feature] = 0.0  # Default flags
+                    if feature in self.feature_statistics:
+                        stats = self.feature_statistics[feature]
+                        prepared[feature] = stats['median']
                     else:
-                        prepared[feature] = 0.0
+                        feature_upper = feature.upper()
+                        if 'CHL' in feature_upper and 'UNCERTAINTY' not in feature_upper:
+                            prepared[feature] = chl_value
+                        elif 'CHL' in feature_upper and 'UNCERTAINTY' in feature_upper:
+                            prepared[feature] = chl_value * 0.1
+                        elif feature == 'PP' or 'PP_' in feature_upper:
+                            prepared[feature] = chl_value * 100
+                        elif 'KD' in feature_upper:
+                            prepared[feature] = 0.1 + (chl_value * 0.05)
+                        elif any(phyto in feature_upper for phyto in ['DIATO', 'DINO', 'GREEN', 'HAPTO', 'MICRO', 'NANO', 'PICO', 'PROCHLO', 'PROKAR']):
+                            if 'UNCERTAINTY' in feature_upper:
+                                prepared[feature] = chl_value * 0.005
+                            else:
+                                prepared[feature] = chl_value * 0.01
+                        elif feature == 'CDM':
+                            prepared[feature] = 0.01 + (chl_value * 0.002)
+                        elif feature == 'BBP':
+                            prepared[feature] = 0.001 + (chl_value * 0.0003)
+                        else:
+                            prepared[feature] = 0.0
             
-            # Create DataFrame in correct feature order
             df = pd.DataFrame([prepared])
             
-            # Ensure all features are present
             missing_features = set(self.features) - set(df.columns)
             for feat in missing_features:
                 df[feat] = 0.0
             
             df = df[self.features]
             
-            # Scale and predict
             scaled = self.scaler.transform(df)
             pred = self.model.predict(scaled)[0]
             proba = self.model.predict_proba(scaled)[0]
             
             pred_int = int(pred)
+            confidence = float(np.max(proba))
             
             result = {
                 'level': pred_int,
                 'level_name': self.classes[pred_int],
-                'confidence': float(np.max(proba)),
+                'confidence': confidence,
                 'probabilities': {
                     self.classes[i]: float(proba[i]) for i in range(len(self.classes))
                 },
-                'features_used': len([v for v in prepared.values() if v != 0.0]),
-                'total_features': len(self.features)
+                'chl_value': chl_value,
+                'features_provided': len(input_values),
+                'features_total': len(self.features)
             }
             
             return result
@@ -397,27 +506,35 @@ class OceanPollutionPredictor:
             return {'error': str(e), 'traceback': traceback.format_exc()}
     
     def interactive_mode(self):
-        print("\n" + "=" * 50)
-        print("Interactive Prediction Mode")
+        print("\n" + "=" * 60)
+        print("OCEAN POLLUTION PREDICTION")
+        print("=" * 60)
         print("Enter 'quit' to exit")
-        print("=" * 50)
+        print("=" * 60)
         
         while True:
             try:
-                print(f"\nRequired feature: CHL (Chlorophyll)")
-                print("Optional features: PP, KD490, DIATO, DINO, etc.")
-                print("-" * 40)
+                print(f"\nRequired: Chlorophyll (CHL)")
+                print(f"Optional: PP, KD490, DIATO, DINO, GREEN, CDM, BBP")
+                print("-" * 50)
                 
-                chl = input("Chlorophyll (CHL) in mg/m³: ").strip()
-                if chl.lower() == 'quit':
+                chl_input = input("Chlorophyll (CHL) in mg/m³: ").strip()
+                if chl_input.lower() == 'quit':
+                    print("\nExiting...")
                     break
                 
-                # Get additional features
-                input_data = {'CHL': float(chl)}
+                try:
+                    chl_value = float(chl_input)
+                    input_data = {'CHL': chl_value}
+                except ValueError:
+                    print("Please enter a valid number for CHL")
+                    continue
                 
+                print(f"\nAdd more features for better accuracy.")
                 add_more = input("Add more features? (y/n): ").strip().lower()
+                
                 if add_more == 'y':
-                    print("\nEnter additional features (format: FEATURE=VALUE):")
+                    print("\nEnter additional features (comma-separated, KEY=VALUE):")
                     print("Example: PP=300, KD490=0.1, DIATO=0.02")
                     additional = input("Additional features: ").strip()
                     
@@ -426,47 +543,65 @@ class OceanPollutionPredictor:
                             pair = pair.strip()
                             if '=' in pair:
                                 key, value = pair.split('=', 1)
+                                key = key.strip().upper()
                                 try:
-                                    input_data[key.strip().upper()] = float(value.strip())
-                                except:
-                                    print(f"Invalid format: {pair}")
+                                    input_data[key] = float(value.strip())
+                                except ValueError:
+                                    print(f"  Skipping {pair}: invalid number")
                 
-                # Make prediction
+                print(f"\nMaking prediction...")
                 result = self.predict(input_data)
                 
                 if 'error' in result:
-                    print(f"\n❌ Error: {result['error']}")
+                    print(f"\nERROR: {result['error']}")
                 else:
-                    print(f"\n✅ Prediction Results:")
-                    print(f"   Pollution Level: {result['level_name']}")
-                    print(f"   Confidence: {result['confidence']:.1%}")
-                    print(f"   Features Used: {result['features_used']}/{result['total_features']}")
+                    print(f"\n" + "=" * 50)
+                    print(f"PREDICTION RESULTS")
+                    print("=" * 50)
                     
-                    print(f"\n   Probabilities:")
-                    for level, prob in result['probabilities'].items():
-                        print(f"     {level}: {prob:.1%}")
+                    level_emoji = {'LOW': '✅', 'MEDIUM': '⚠️', 'HIGH': '🚨'}
+                    emoji = level_emoji.get(result['level_name'], '📊')
                     
-                    # Recommendation
-                    recommendations = {
-                        0: "✅ Water quality is good. Continue normal monitoring.",
-                        1: "⚠️ Moderate pollution detected. Increase monitoring frequency.",
-                        2: "🚨 High pollution level! Immediate action required."
-                    }
-                    print(f"\n   Recommendation: {recommendations[result['level']]}")
+                    print(f"{emoji} Pollution Level: {result['level_name']}")
+                    print(f"Confidence: {result['confidence']:.1%}")
+                    print(f"Chlorophyll: {result['chl_value']} mg/m³")
+                    
+                    print(f"\nProbability Distribution:")
+                    probs = result['probabilities']
+                    for level, prob in probs.items():
+                        bar_length = int(prob * 30)
+                        bar = '█' * bar_length + '░' * (30 - bar_length)
+                        print(f"  {level:7s} [{bar}] {prob:.1%}")
+                    
+                    print(f"\nRecommendations:")
+                    if result['level_name'] == 'LOW':
+                        print("  • Water quality is good")
+                        print("  • Continue normal monitoring")
+                    elif result['level_name'] == 'MEDIUM':
+                        print("  • Moderate pollution detected")
+                        print("  • Increase monitoring frequency")
+                    else:
+                        print("  • HIGH POLLUTION LEVEL")
+                        print("  • Immediate action required")
+                        print("  • Notify authorities")
                 
-            except ValueError:
-                print("Please enter valid numbers")
+                print(f"\n" + "-" * 50)
+                continue_choice = input("Make another prediction? (y/n): ").strip().lower()
+                if continue_choice != 'y':
+                    break
+                
             except KeyboardInterrupt:
-                print("\nExiting interactive mode")
+                print("\nInterrupted by user.")
                 break
             except Exception as e:
-                print(f"Error: {e}")
+                print(f"\nError: {e}")
+                continue
 
 
 def main():
-    print("=" * 60)
-    print("Ocean Pollution Prediction System")
-    print("=" * 60)
+    print("=" * 70)
+    print("OCEAN POLLUTION PREDICTION SYSTEM")
+    print("=" * 70)
     
     predictor = OceanPollutionPredictor()
     
@@ -475,48 +610,93 @@ def main():
     if '--train' in args or '-t' in args:
         print("Training new model...")
         if not predictor.train_model():
-            return
+            print("Model training failed!")
+            sys.exit(1)
+        print("\nModel training completed!")
+    
     elif os.path.exists('models/ocean_model.pkl'):
         print("Loading existing model...")
         if not predictor.load_model():
             print("Failed to load model. Use --train to train new model.")
-            return
+            sys.exit(1)
+        print("Model loaded successfully!")
     else:
         print("No model found. Use --train to train new model.")
-        return
+        print("\nUsage: python predict.py --train")
+        sys.exit(1)
     
     if '--interactive' in args or '-i' in args:
         predictor.interactive_mode()
+    
     elif '--demo' in args or '-d' in args:
-        print("\nDemo Predictions:")
-        print("-" * 40)
+        print("\n" + "=" * 60)
+        print("DEMO PREDICTIONS")
+        print("=" * 60)
         
         test_cases = [
-            {'name': 'Open Ocean', 'CHL': 0.3},
-            {'name': 'Coastal Bay', 'CHL': 2.5, 'PP': 400},
-            {'name': 'Polluted Estuary', 'CHL': 8.0, 'PP': 800, 'DIATO': 0.2}
+            {'name': 'Open Ocean', 'data': {'CHL': 0.3}},
+            {'name': 'Coastal Bay', 'data': {'CHL': 2.5, 'PP': 400, 'KD490': 0.2}},
+            {'name': 'Polluted Estuary', 'data': {'CHL': 8.0, 'PP': 800, 'KD490': 0.5, 'DIATO': 0.2}},
+            {'name': 'Clear Coastal', 'data': {'CHL': 0.8}},
+            {'name': 'Algal Bloom', 'data': {'CHL': 15.0, 'PP': 1200, 'GREEN': 0.5}}
         ]
         
         for test in test_cases:
-            print(f"\n📍 {test['name']}:")
-            result = predictor.predict(test)
+            print(f"\n{test['name']}:")
+            result = predictor.predict(test['data'])
             
-            if 'error' not in result:
-                print(f"  Chlorophyll: {test['CHL']} mg/m³")
-                print(f"  Prediction: {result['level_name']}")
-                print(f"  Confidence: {result['confidence']:.1%}")
-            else:
+            if 'error' in result:
                 print(f"  Error: {result['error']}")
+            else:
+                emoji = {'LOW': '✅', 'MEDIUM': '⚠️', 'HIGH': '🚨'}.get(result['level_name'], '📊')
+                print(f"  {emoji} Prediction: {result['level_name']}")
+                print(f"  Confidence: {result['confidence']:.1%}")
+                print(f"  CHL: {result['chl_value']} mg/m³")
+        
+        print(f"\n" + "=" * 60)
+        print("Demo completed!")
+    
+    elif '--predict' in args or '-p' in args:
+        print("\nQuick Prediction Mode")
+        print("Enter feature values as KEY=VALUE pairs")
+        print("Example: CHL=2.5 PP=300 KD490=0.2")
+        
+        try:
+            input_str = input("\nEnter features: ").strip()
+            if input_str:
+                input_data = {}
+                for pair in input_str.split():
+                    if '=' in pair:
+                        key, value = pair.split('=', 1)
+                        try:
+                            input_data[key.upper()] = float(value)
+                        except:
+                            input_data[key.upper()] = value
+                
+                if input_data:
+                    result = predictor.predict(input_data)
+                    if 'error' in result:
+                        print(f"Error: {result['error']}")
+                    else:
+                        print(f"\nResult: {result['level_name']}")
+                        print(f"Confidence: {result['confidence']:.1%}")
+        except KeyboardInterrupt:
+            print("\nExiting...")
     
     else:
-        print("\nUsage options:")
+        print("\n" + "=" * 70)
+        print("USAGE OPTIONS")
+        print("=" * 70)
+        print("  --train, -t       : Train a new model")
         print("  --interactive, -i : Interactive prediction mode")
         print("  --demo, -d        : Run demo predictions")
-        print("  --train, -t       : Train new model")
-        print("\nExamples:")
-        print("  python predict.py --demo")
-        print("  python predict.py --interactive")
+        print("  --predict, -p     : Quick prediction from command line")
+        print("\n" + "=" * 70)
+        print("EXAMPLES")
+        print("=" * 70)
         print("  python predict.py --train")
+        print("  python predict.py --interactive")
+        print("  python predict.py --demo")
 
 
 if __name__ == "__main__":
