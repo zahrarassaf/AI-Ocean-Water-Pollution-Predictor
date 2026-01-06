@@ -1,30 +1,24 @@
 version: '3.8'
 
 services:
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./models:/app/models
+      - ./data:/app/data
+    environment:
+      - PYTHONUNBUFFERED=1
+    command: uvicorn api:app --host 0.0.0.0 --port 8000 --reload
+
   dashboard:
     build: .
     ports:
       - "8501:8501"
     volumes:
-      - ./data:/app/data
       - ./models:/app/models
+      - ./data:/app/data
     environment:
       - PYTHONUNBUFFERED=1
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8501/_stcore/health')"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-
-  api:
-    build: .
-    ports:
-      - "8000:8000"
-    command: python api/api.py
-    volumes:
-      - ./data:/app/data
-      - ./models:/app/models
-    depends_on:
-      - dashboard
-    restart: unless-stopped
+    command: streamlit run main.py --server.port 8501 --server.address 0.0.0.0
