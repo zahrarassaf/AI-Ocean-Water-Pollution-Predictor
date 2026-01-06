@@ -1,9 +1,15 @@
 🌊 AI Ocean Water Pollution Prediction System
+
 https://img.shields.io/badge/Python-3.9-blue
+
 https://img.shields.io/badge/FastAPI-005571?style=flat&logo=fastapi
+
 https://img.shields.io/badge/Docker-2496ED?style=flat&logo=docker
+
 https://img.shields.io/badge/Streamlit-FF4B4B?style=flat&logo=streamlit
+
 https://img.shields.io/badge/Accuracy-98.56%2525-brightgreen
+
 https://img.shields.io/badge/License-MIT-green
 
 A production-ready machine learning system that predicts ocean pollution levels with 98.56% accuracy using multi-dimensional satellite data from CMEMS Copernicus Marine Service. Complete end-to-end pipeline from 3D spatiotemporal data alignment to containerized deployment with interactive dashboard.
