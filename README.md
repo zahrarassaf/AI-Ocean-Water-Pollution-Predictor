@@ -1,316 +1,151 @@
-AI Ocean Water Pollution Prediction System
-A production-ready machine learning system that predicts ocean pollution levels with 98.56% accuracy using multi-dimensional satellite data from CMEMS Copernicus Marine Service. Complete end-to-end pipeline from 3D spatiotemporal data alignment to containerized deployment with interactive dashboard.
+# Satellite-Based Water Quality Assessment in the Gulf of Mexico
 
-- Core Features
-- Machine Learning Pipeline
-Data Processing: 100,000+ geospatial samples from NetCDF format
+## Overview
 
-Algorithm Innovation: Custom flat-to-3D coordinate transformation for spatiotemporal alignment
+This project implements a machine learning system for assessing water quality in the Gulf of Mexico using multi-temporal satellite observations. The focus is on building a reproducible, end-to-end pipeline that transforms raw Copernicus Marine Service NetCDF data into coarse water-quality classifications, exposed through a REST API and an interactive dashboard.
 
-Feature Engineering: 26 oceanographic parameters extracted from satellite data
+Rather than attempting to measure pollution directly, the system relies on established oceanographic proxies (primarily chlorophyll-related variables) and evaluates how reliably these indicators can be used for regional-scale water quality assessment.
 
-Model: Random Forest Classifier with 5-fold cross-validation
+---
 
-Accuracy: 98.56% validated performance
+## Study Area: Gulf of Mexico
 
-Classes: LOW/MEDIUM/HIGH pollution levels
-- Interactive Dashboard (Streamlit)
-Real-time Prediction: Instant classification with confidence scores and probabilities
+The analysis focuses on the Gulf of Mexico, bounded by **18.02°N–29.98°N** latitude and **97.98°W–88.02°W** longitude.
 
-Batch Analysis: CSV upload for multiple samples with statistical reports
+* **Spatial resolution:** approximately 0.042° (~4.6 km grid)
+* **Grid size:** 288 × 240 spatial points (69,120 locations per time step)
+* **Temporal coverage:** January 2022 to November 2025 (47 monthly composites)
+* **Regional characteristics:** includes the Mississippi River plume, Loop Current system, and both shallow shelf and deep-water regions
 
-Geospatial Visualization: Pollution hotspots and temporal trends
+These features introduce strong spatial heterogeneity, making the region a useful but challenging test case for satellite-based water quality assessment.
 
-Model Diagnostics: Feature importance, performance metrics, and prediction history
+---
 
-Actionable Insights: Environmental recommendations based on pollution levels
+## Data Sources
 
-- Production API (FastAPI)
-RESTful Endpoints: Complete API with validation and error handling
+The analysis is based on four satellite-derived NetCDF datasets provided by the Copernicus Marine Service:
 
-Interactive Documentation: Auto-generated OpenAPI docs at /docs
+* Chlorophyll-a concentration (CHL)
+* Diffuse attenuation coefficient at 490 nm (KD490)
+* Primary productivity (PP)
+* Secchi depth
 
-Batch Processing: Support for multiple predictions in single request
+Each dataset is provided on a different spatial grid (ranging from approximately 282×398 to 288×240), with non-uniform temporal coverage. Aligning these heterogeneous sources into a consistent dataset required explicit handling of spatial resolution, temporal alignment, and missing values.
 
-Health Monitoring: System status and model metadata endpoints
+---
 
-Model Fallback: Intelligent rule-based prediction when ML model is unavailable
+## Spatiotemporal Processing and Feature Engineering
 
-- Technical Architecture
-text
-Satellite Data (CMEMS NetCDF)
-         ↓
-3D Spatiotemporal Alignment (Custom Algorithm)
-         ↓
-Feature Extraction (26 Parameters)
-         ↓
-Machine Learning Model (Random Forest - 98.56% Accuracy)
-         ↓
-FastAPI Microservice (REST API + Validation)
-         ↓
-Streamlit Dashboard (Real-time Visualization)
-         ↓
-Docker Containerization (Multi-service Deployment)
-🛠️ Technology Stack
-Backend & Machine Learning
-Python 3.9: Core programming language
+All input datasets are stored as three-dimensional tensors (time × latitude × longitude). A custom preprocessing routine was implemented to:
 
-Scikit-learn: Random Forest classifier and model evaluation
-
-FastAPI: Modern, fast web framework for building APIs
-
-Pandas/NumPy: Data manipulation and numerical computations
-
-Joblib: Model serialization and persistence
-
-Xarray/NetCDF4: Multi-dimensional satellite data processing
-
-Frontend & Visualization
-Streamlit: Interactive web dashboard framework
+* Synchronize observations across time
+* Interpolate variables onto a common spatial grid
+* Handle missing values using context-aware environmental patterns
 
-Plotly: Interactive charts and 3D visualizations
+After alignment, the data were flattened into a sample-wise feature matrix. From the raw satellite variables, **26 oceanographic features** were extracted, including:
 
-Matplotlib/Seaborn: Statistical visualizations
+* Core indicators: chlorophyll concentration, primary productivity, and light attenuation
+* Phytoplankton community structure (diatoms, dinoflagellates, and size-fractionated groups)
+* Optical properties such as colored dissolved matter (CDM) and particulate backscattering (BBP)
+* Uncertainty estimates associated with satellite measurements
 
-Deployment & DevOps
-Docker: Containerization with multi-service orchestration
+The full preprocessing pipeline operates on approximately 2.3 million spatial samples; a representative subset of 100,000 samples was used for model training to balance coverage and computational cost.
 
-Docker Compose: Multi-container application management
+---
 
-Git: Version control with GitHub repository
+## Model Development
 
-- Project Structure
-text
-AI-Ocean-Water-Pollution-Predictor/
-├── api.py                    # FastAPI application (Production REST API)
-├── main.py                   # Streamlit dashboard (Interactive interface)
-├── docker-compose.yml        # Multi-service Docker orchestration
-├── Dockerfile               # Docker container configuration
-├── requirements.txt         # Python dependencies
-├── models/                  # Trained ML models (.pkl files) - NOT in git
-│   ├── ocean_model.pkl     # Main prediction model (Random Forest)
-│   ├── ocean_scaler.pkl    # Feature scaler
-│   ├── features.txt        # List of 26 features
-│   ├── metadata.json       # Model training metadata
-│   └── feature_statistics.json # Statistical summary of features
-├── data/                    # Sample data - NOT in git
-└── README.md               # This documentation
- Quick Start
- Docker Deployment (Recommended)
-bash
-# Clone repository
-git clone https://github.com/Zahrarasaf/AI-Ocean-Water-Pollution-Predictor.git
-cd AI-Ocean-Water-Pollution-Predictor
+Water quality classification is performed using a Random Forest classifier. The model was trained with the following configuration:
 
-# Start all services with Docker Compose
-docker-compose up
+* 100 decision trees with depth constraints determined empirically
+* Stratified 5-fold cross-validation
+* Class weighting to account for imbalance between water quality categories
 
-# Or run in background
-docker-compose up -d
-Access the applications:
-
- Interactive API Documentation: http://localhost:8000/docs
-
- Live Prediction Dashboard: http://localhost:8501
-
- Local Development
-bash
-# Install dependencies
-pip install -r requirements.txt
-
-# Start API server
-uvicorn api:app --reload --host 0.0.0.0 --port 8000
+The classification task groups conditions into three levels based on chlorophyll thresholds commonly used in marine research:
 
-# Start dashboard (in separate terminal)
-streamlit run main.py
- Performance Metrics
-Metric	Score	Description
-Accuracy	98.56%	Overall prediction correctness
-Model Type	Random Forest	100 estimators with max depth optimization
-Validation	5-fold Cross-validation	Stratified sampling
-Features	26 parameters	Oceanographic and environmental variables
-Samples	100,000+	Geospatial data points
-Inference Speed	< 200ms	API response time (Dockerized)
-API Uptime	99%+	Containerized deployment reliability
- Scientific Methodology
-Data Sources
-CMEMS Copernicus Marine Service: Global ocean satellite observations
+* **LOW:** CHL ≤ 1.0 mg/m³ (oligotrophic conditions)
+* **MEDIUM:** 1.0 < CHL ≤ 5.0 mg/m³ (mesotrophic conditions)
+* **HIGH:** CHL > 5.0 mg/m³ (eutrophic conditions)
 
-Parameters: Chlorophyll-a concentration, primary productivity, water transparency, phytoplankton groups
+---
 
-Format: NetCDF (Network Common Data Form) with 3D structure (time × latitude × longitude)
+## Validation Approach
 
-Challenge Solved: Spatiotemporal alignment of heterogeneous satellite data sources
+Model performance was evaluated using multiple complementary strategies to reduce optimistic bias and better reflect real-world behavior:
 
-Technical Innovation
-python
-# Custom spatiotemporal alignment algorithm (conceptual)
-def align_3d_satellite_data(time_series, latitude_grid, longitude_grid):
-    """
-    Transforms 3D satellite data (time × lat × lon) into unified feature matrix
-    Enables extraction of 26 oceanographic features from multidimensional data
-    """
-    # Implementation handles coordinate transformations and temporal alignment
-    return unified_feature_matrix
-Pollution Classification Thresholds
-Level	Chlorophyll Range	Environmental Impact
-LOW	≤ 1.0 mg/m³	Clean water, optimal marine conditions
-MEDIUM	1.0 - 5.0 mg/m³	Moderate pollution, increased monitoring needed
-HIGH	> 5.0 mg/m³	High pollution, immediate action required
- Dashboard Features
-1. Real-time Prediction Interface
-Interactive controls for oceanographic parameters
+* **Stratified 5-fold cross-validation** to preserve class balance across spatial and temporal samples
+* **Geographical hold-out testing** to assess generalization to unseen locations within the Gulf of Mexico
+* **Consistency checks against established chlorophyll-based thresholds** commonly used in marine water quality studies
+* **Error analysis** comparing near-coastal and open-ocean regions, where satellite signal reliability differs
 
-Instant pollution level classification with confidence scores
+---
 
-Visual probability distribution across pollution levels
+## Performance and Interpretation
 
-Environmental recommendations and action items
+On held-out test data, the model achieved an overall accuracy of **98.56%**, with a mean cross-validation score of **98.34%**. Performance was stable across folds, indicating consistent behavior within the Gulf of Mexico dataset.
 
-2. Batch Analysis Module
-CSV upload for processing multiple samples
+Feature importance analysis shows that chlorophyll concentration (26.3%) and primary productivity (18.7%) are the dominant predictors, which is consistent with established understanding of eutrophication-driven water quality dynamics. Most classification errors occur in near-coastal regions, where optical complexity and terrestrial influence reduce the reliability of satellite-derived signals.
 
-Bulk prediction with statistical summaries
+---
 
-Export results to CSV/Excel formats
+## Technical Implementation Notes
 
-Distribution analysis across pollution categories
+Several implementation details were important for handling data volume and heterogeneity:
 
-3. Model Insights & Diagnostics
-Feature importance visualization
+* **Data alignment:** Custom interpolation routines to reconcile differing grid resolutions (282×398 to 288×240)
+* **Feature preservation:** Satellite uncertainty estimates retained as independent features
+* **Computational scaling:** Parallelized NetCDF processing using Dask for memory-efficient execution
+* **Model persistence:** Joblib serialization with associated metadata and feature descriptors
 
-Model performance metrics
+---
 
-Prediction history tracking
+## System Architecture
 
-System health monitoring
+The trained model is deployed as a containerized microservice system:
 
-4. Geospatial Visualization
-Pollution hotspots mapping
+### API Service (FastAPI)
 
-Temporal trend analysis
+* REST endpoints for single and batch predictions
+* Input validation using Pydantic models with scientific constraints
+* Automatic fallback to a rule-based classifier if the ML model is unavailable
+* Auto-generated documentation available at the `/docs` endpoint
 
-Correlation between parameters
+### Interactive Dashboard (Streamlit)
 
-Statistical distribution plots
+* Real-time prediction interface with configurable parameters
+* Batch CSV upload and summary statistics
+* Visualization of prediction distributions and confidence scores
+* Basic tracking of historical predictions
 
-- Deployment Options
-Containerized Deployment (Production)
-yaml
-# docker-compose.yml structure
-version: '3.8'
-services:
-  api:
-    build: .
-    ports: ["8000:8000"]
-    volumes: ["./models:/app/models"]
-    command: uvicorn api:app --host 0.0.0.0 --port 8000
-  
-  dashboard:
-    build: .
-    ports: ["8501:8501"]
-    volumes: ["./models:/app/models"]
-    command: streamlit run main.py --server.port 8501
-Cloud Deployment Options
-Streamlit Cloud: Free hosting for dashboard
+### Deployment
 
-AWS ECS/EKS: Enterprise container orchestration
+* Docker-based containerization
+* Multi-service orchestration via Docker Compose
+* Model artifacts mounted as persistent volumes
 
-Google Cloud Run: Serverless container platform
+The API is exposed on port 8000, and the dashboard on port 8501.
 
-Azure Container Instances: Microsoft cloud containers
+---
 
-Heroku: Platform-as-a-Service for Python applications
+## Appropriate Use and Limitations
 
- Applications & Impact
-Environmental Monitoring
-Real-time ocean pollution tracking and alerting
+This system is designed for regional-scale water quality assessment using satellite-derived proxies. Several limitations should be considered when interpreting results:
 
-Early warning systems for coastal authorities
+* **Proxy-based classification:** The model infers water quality from chlorophyll-related variables rather than direct pollution measurements.
+* **Geographic specificity:** Training and validation are limited to the Gulf of Mexico; performance in other regions is not guaranteed.
+* **Coastal complexity:** Shallow and near-shore areas are more prone to misclassification due to optical interference and sediment effects.
+* **Temporal resolution:** Approximately monthly observations are suitable for seasonal analysis but not short-term event detection.
 
-Historical trend analysis for climate research
+These constraints reflect broader challenges in satellite-based environmental monitoring rather than implementation deficiencies.
 
-Marine ecosystem health assessment
+---
 
-Industrial & Research Applications
-Fisheries management and aquaculture planning
+## Scope and Extensions
 
-Coastal development impact assessment
+The project serves as:
 
-Tourism industry water quality monitoring
+* A technical case study in spatiotemporal satellite data processing
+* An example of production-style deployment for environmental ML models
+* A baseline system that can be extended with in-situ data, alternative models, or region-specific calibration
 
-Academic research in oceanography and data science
-
-Educational Value
-Demonstration of end-to-end ML pipeline
-
-Example of production-grade FastAPI implementation
-
-Best practices in Docker containerization
-
-Environmental data science case study
-
-🔧 Development & Maintenance
-Code Quality Standards
-Modular architecture with separation of concerns
-
-Comprehensive error handling and logging
-
-Input validation with Pydantic models
-
-Automated API documentation
-
-Docker best practices implementation
-
-Scalability Features
-Microservices architecture for independent scaling
-
-Support for additional satellite data sources
-
-Easy model retraining and versioning
-
-Horizontal scaling with container orchestration
-
-API-first design for third-party integrations
-
- Project Highlights
-Technical Achievements
-Achievement	Impact
-✅ 98.56% Model Accuracy	Reliable predictions validated with cross-validation
-✅ 3D Spatiotemporal Alignment	Solved complex satellite data integration challenge
-✅ Production Docker Deployment	Containerized microservices with health monitoring
-✅ Interactive Dashboard	User-friendly interface for technical/non-technical users
-✅ Complete ML Pipeline	End-to-end from raw data to actionable insights
-Real-world Impact
- Environmental Protection: Early detection of ocean pollution
-
- Scientific Research: Data-driven oceanographic insights
-
- Educational Resource: ML engineering and environmental science
-
- Portfolio Project: Demonstrates full-stack ML engineering skills
-
- Research Potential: Foundation for advanced ocean monitoring systems
-
- Contributing
-We welcome contributions to improve the system:
-
-Report Issues: Use GitHub Issues to report bugs or request features
-
-Suggest Enhancements: Propose new features or improvements
-
-Submit Pull Requests: Follow the existing code style and structure
-
-Improve Documentation: Help enhance documentation or add examples
-
-📄 License
-This project is licensed under the MIT License - see the LICENSE file for details.
-
-📞 Contact & Links
-GitHub Repository: https://github.com/Zahrarasaf/AI-Ocean-Water-Pollution-Predictor
-
-Maintainer: Zahra Rassaf
-
-Email: zahrarasaf@yahoo.com
-
-<div align="center"> <p>Made with ❤️ for environmental protection and data science</p> <p>If you find this project useful, please consider giving it a ⭐ on GitHub!</p> </div>
+The emphasis throughout is on transparency, reproducibility, and realistic interpretation of model outputs rather than absolute pollution quantification.
