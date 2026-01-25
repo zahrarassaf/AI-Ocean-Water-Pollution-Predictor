@@ -1,3 +1,8 @@
+"""
+Ocean Pollution Prediction System
+ML model for predicting ocean pollution levels from satellite data
+"""
+
 import joblib
 import pandas as pd
 import numpy as np
@@ -12,10 +17,12 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import train_test_split, cross_val_score
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
-from sklearn.cluster import KMeans
 warnings.filterwarnings('ignore')
 
+
 class OceanPollutionPredictor:
+    """Machine learning model for ocean pollution prediction"""
+    
     def __init__(self, data_path="data/raw"):
         self.model = None
         self.scaler = None
@@ -26,6 +33,7 @@ class OceanPollutionPredictor:
         self.feature_statistics = {}
     
     def _remove_duplicates(self, features_list):
+        """Remove duplicate features while preserving order"""
         unique_features = []
         seen = set()
         for feat in features_list:
@@ -35,6 +43,7 @@ class OceanPollutionPredictor:
         return unique_features
     
     def _calculate_feature_statistics(self, X, feature_names):
+        """Calculate statistics for each feature"""
         for i, feat in enumerate(feature_names):
             if feat not in self.feature_statistics:
                 self.feature_statistics[feat] = {
@@ -46,69 +55,188 @@ class OceanPollutionPredictor:
                 }
     
     def load_datasets(self):
+        """Load all NetCDF files from data directory"""
         try:
             nc_files = glob.glob(os.path.join(self.data_path, "*.nc"))
             if not nc_files:
                 print("No NetCDF files found in data/raw/")
                 return False
             
+            print(f"Found {len(nc_files)} NetCDF files:")
             for filepath in nc_files:
                 filename = os.path.basename(filepath)
                 try:
                     ds = xr.open_dataset(filepath)
                     self.datasets[filename] = ds
-                    print(f"Loaded: {filename}")
-                except:
-                    print(f"Error loading: {filename}")
+                    print(f"  Loaded: {filename} ({len(ds.data_vars)} variables)")
+                except Exception as e:
+                    print(f"  Error loading {filename}: {e}")
                     continue
             
+            # Display what's in each file
+            print("\nDataset contents:")
+            for filename, ds in self.datasets.items():
+                vars_list = list(ds.data_vars)
+                print(f"  {filename}: {vars_list}")
+            
             return bool(self.datasets)
-        except:
+            
+        except Exception as e:
+            print(f"Error in load_datasets: {e}")
+            traceback.print_exc()
             return False
     
+    def find_chlorophyll_dataset(self):
+        """Find which dataset contains chlorophyll data"""
+        chl_dataset = None
+        chl_filename = None
+        chl_variable = None
+        
+        for filename, ds in self.datasets.items():
+            for var_name in ds.data_vars:
+                var_upper = var_name.upper()
+                # Look for chlorophyll-related variable names
+                if any(chl_keyword in var_upper for chl_keyword in ['CHL', 'CHLOROPHYLL']):
+                    chl_dataset = ds
+                    chl_filename = filename
+                    chl_variable = var_name
+                    print(f"Found chlorophyll in: {filename} (variable: {var_name})")
+                    break
+            if chl_dataset:
+                break
+        
+        if chl_dataset is None:
+            print("\nWARNING: No chlorophyll data found!")
+            print("Available variables across all files:")
+            for filename, ds in self.datasets.items():
+                print(f"  {filename}: {list(ds.data_vars)}")
+        
+        return chl_dataset, chl_filename, chl_variable
+    
     def create_pollution_index(self, X, feature_names):
+        """Create pollution index from multiple indicators"""
         pollution_score = np.zeros(X.shape[0])
         
+        # Updated pollution indicators based on available data
         pollution_indicators = {
             'CHL': 0.30,
-            'KD490': 0.20,
+            'KD490': 0.25,
+            'PP': 0.20,
             'CDM': 0.15,
-            'BBP': 0.15,
-            'PP': 0.10,
-            'DIATO': 0.05,
-            'DINO': 0.05,
+            'BBP': 0.10
         }
         
+        # Try to find available indicators
+        available_indicators = {}
         for indicator, weight in pollution_indicators.items():
+            # Check if exact match
             if indicator in feature_names:
-                idx = feature_names.index(indicator)
-                data = X[:, idx]
-                if np.max(data) > np.min(data):
-                    norm_data = (data - np.min(data)) / (np.max(data) - np.min(data))
-                    pollution_score += norm_data * weight
+                available_indicators[indicator] = weight
+            else:
+                # Check for similar names
+                for feat in feature_names:
+                    if indicator in feat.upper():
+                        available_indicators[feat] = weight
+                        break
+        
+        # If no exact matches found, use whatever is available
+        if not available_indicators:
+            for i, feat in enumerate(feature_names):
+                available_indicators[feat] = 1.0 / len(feature_names)
+        
+        # Normalize and combine indicators
+        total_weight = sum(available_indicators.values())
+        if total_weight > 0:
+            for indicator, weight in available_indicators.items():
+                if indicator in feature_names:
+                    idx = feature_names.index(indicator)
+                    data = X[:, idx]
+                    if np.max(data) > np.min(data):
+                        norm_data = (data - np.min(data)) / (np.max(data) - np.min(data))
+                        pollution_score += norm_data * (weight / total_weight)
         
         return pollution_score
     
-    def create_dataset(self, sample_limit=100000):
+    def extract_features_from_datasets(self, sampled_points):
+        """Extract features from all datasets for sampled points"""
+        feature_data = {}
+        feature_names = []
+        added_features = set()
+        
+        # First pass: collect all available features
+        all_features = []
+        for filename, ds in self.datasets.items():
+            for var_name in ds.data_vars:
+                if var_name.lower() not in ['time', 'latitude', 'longitude', 'lat', 'lon']:
+                    all_features.append((filename, var_name))
+        
+        print(f"\nTotal features available: {len(all_features)}")
+        
+        # Process each feature
+        for filename, var_name in all_features:
+            ds = self.datasets[filename]
+            
+            if var_name in added_features:
+                continue
+            
+            try:
+                var_data = ds[var_name].values
+                if var_data.ndim != 3:
+                    print(f"  Skipping {var_name}: Not 3D data")
+                    continue
+                
+                var_values = []
+                valid_count = 0
+                
+                for point in sampled_points:
+                    try:
+                        value = var_data[point['time_idx'], point['lat_idx'], point['lon_idx']]
+                        if not np.isnan(value):
+                            var_values.append(value)
+                            valid_count += 1
+                        else:
+                            var_values.append(np.nan)
+                    except (IndexError, ValueError):
+                        var_values.append(np.nan)
+                
+                valid_ratio = valid_count / len(sampled_points)
+                if valid_ratio > 0.3:  # Keep if more than 30% valid
+                    var_array = np.array(var_values)
+                    median_val = np.nanmedian(var_array)
+                    var_array[np.isnan(var_array)] = median_val
+                    
+                    feature_data[var_name] = var_array
+                    feature_names.append(var_name)
+                    added_features.add(var_name)
+                    print(f"  Added: {var_name} ({valid_ratio:.1%} valid)")
+                else:
+                    print(f"  Skipped: {var_name} (only {valid_ratio:.1%} valid)")
+                    
+            except Exception as e:
+                print(f"  Error extracting {var_name}: {e}")
+                continue
+        
+        return feature_data, feature_names
+    
+    def create_dataset(self, sample_limit=50000):
+        """Create dataset from loaded NetCDF files"""
         try:
-            reference_ds = None
-            reference_filename = None
+            # Find dataset with chlorophyll or use first available
+            chl_ds, chl_filename, chl_variable = self.find_chlorophyll_dataset()
             
-            for filename, ds in self.datasets.items():
-                if 'CHL' in ds.variables:
-                    reference_ds = ds
-                    reference_filename = filename
-                    break
+            if chl_ds is None:
+                print("Using first available dataset as reference")
+                chl_ds = list(self.datasets.values())[0]
+                chl_filename = list(self.datasets.keys())[0]
+                chl_variable = list(chl_ds.data_vars)[0]
             
-            if reference_ds is None:
-                print("No CHL data found")
-                return None, None, None
+            print(f"\nUsing reference dataset: {chl_filename}")
+            print(f"Reference variable: {chl_variable}")
             
-            print(f"Using reference dataset: {reference_filename}")
-            
-            chl_data = reference_ds['CHL'].values
-            chl_flat = chl_data.flatten()
-            valid_mask = ~np.isnan(chl_flat)
+            # Get data from reference variable
+            ref_data = chl_ds[chl_variable].values
+            ref_flat = ref_data.flatten()
+            valid_mask = ~np.isnan(ref_flat)
             valid_indices = np.where(valid_mask)[0]
             
             if len(valid_indices) > sample_limit:
@@ -117,7 +245,12 @@ class OceanPollutionPredictor:
             else:
                 sample_indices = valid_indices
             
-            time_size, lat_size, lon_size = chl_data.shape
+            if len(sample_indices) == 0:
+                print("ERROR: No valid data points found!")
+                return None, None, None
+            
+            # Calculate indices for 3D array
+            time_size, lat_size, lon_size = ref_data.shape
             sampled_points = []
             
             for idx in sample_indices:
@@ -130,61 +263,18 @@ class OceanPollutionPredictor:
                     'time_idx': time_idx,
                     'lat_idx': lat_idx,
                     'lon_idx': lon_idx,
-                    'chl_value': chl_flat[idx]
+                    'ref_value': ref_flat[idx]
                 })
             
-            feature_data = {'CHL': np.array([p['chl_value'] for p in sampled_points])}
-            feature_names = ['CHL']
-            added_features = set(['CHL'])
+            # Extract features from all datasets
+            print("\nExtracting features from all datasets...")
+            feature_data, feature_names = self.extract_features_from_datasets(sampled_points)
             
-            for filename, ds in self.datasets.items():
-                print(f"Extracting variables from: {filename}")
-                
-                for var_name in ds.variables:
-                    if var_name.lower() in ['time', 'latitude', 'longitude', 'lat', 'lon']:
-                        continue
-                    
-                    if var_name in added_features:
-                        print(f"  Skipped: {var_name} (already exists)")
-                        continue
-                    
-                    if var_name == 'CHL' and filename == reference_filename:
-                        continue
-                    
-                    try:
-                        var_data = ds[var_name].values
-                        if var_data.ndim != 3:
-                            continue
-                        
-                        var_values = []
-                        valid_count = 0
-                        
-                        for point in sampled_points:
-                            try:
-                                value = var_data[point['time_idx'], point['lat_idx'], point['lon_idx']]
-                                if not np.isnan(value):
-                                    var_values.append(value)
-                                    valid_count += 1
-                                else:
-                                    var_values.append(np.nan)
-                            except IndexError:
-                                var_values.append(np.nan)
-                        
-                        valid_ratio = valid_count / len(sampled_points)
-                        if valid_ratio > 0.3:
-                            var_array = np.array(var_values)
-                            median_val = np.nanmedian(var_array)
-                            var_array[np.isnan(var_array)] = median_val
-                            
-                            feature_data[var_name] = var_array
-                            feature_names.append(var_name)
-                            added_features.add(var_name)
-                            print(f"  Added: {var_name} ({valid_ratio:.1%} valid)")
-                        
-                    except Exception as e:
-                        print(f"  Error extracting {var_name}: {e}")
-                        continue
+            if not feature_names:
+                print("ERROR: No features extracted!")
+                return None, None, None
             
+            # Create feature matrix
             X_list = []
             final_features = []
             
@@ -195,34 +285,43 @@ class OceanPollutionPredictor:
             
             X = np.column_stack(X_list)
             
+            # Calculate statistics
             self._calculate_feature_statistics(X, final_features)
             
-            print("\nCreating pollution labels using multiple indicators...")
+            # Create pollution index
+            print("\nCreating pollution labels...")
             pollution_score = self.create_pollution_index(X, final_features)
             
+            # Define thresholds
             low_threshold = np.percentile(pollution_score, 33)
             medium_threshold = np.percentile(pollution_score, 66)
             
+            # Create labels
             y = np.zeros(len(pollution_score))
             y[pollution_score > medium_threshold] = 2
             y[(pollution_score > low_threshold) & (pollution_score <= medium_threshold)] = 1
             
+            # Print statistics
             print(f"\nPollution Label Distribution:")
             print(f"  LOW: {np.sum(y == 0):,} samples")
             print(f"  MEDIUM: {np.sum(y == 1):,} samples")
             print(f"  HIGH: {np.sum(y == 2):,} samples")
             
-            chl_idx = final_features.index('CHL') if 'CHL' in final_features else 0
-            chl_values = X[:, chl_idx]
-            chl_corr = np.corrcoef(chl_values, y)[0, 1]
-            print(f"  Correlation with CHL: {chl_corr:.3f}")
+            # Calculate correlation with reference variable
+            if chl_variable in final_features:
+                ref_idx = final_features.index(chl_variable)
+                ref_values = X[:, ref_idx]
+                ref_corr = np.corrcoef(ref_values, y)[0, 1]
+                print(f"  Correlation with {chl_variable}: {ref_corr:.3f}")
             
+            # Close datasets
             for ds in self.datasets.values():
                 ds.close()
             
+            # Remove duplicates
             final_features = self._remove_duplicates(final_features)
             
-            print(f"\nDataset created:")
+            print(f"\nDataset created successfully:")
             print(f"  Samples: {X.shape[0]:,}")
             print(f"  Features: {len(final_features)}")
             print(f"  Pollution score range: {pollution_score.min():.3f} to {pollution_score.max():.3f}")
@@ -235,10 +334,17 @@ class OceanPollutionPredictor:
             return None, None, None
     
     def train_model(self):
+        """Train Random Forest model"""
         try:
+            print("\n" + "="*60)
+            print("TRAINING OCEAN POLLUTION PREDICTION MODEL")
+            print("="*60)
+            
+            # Load datasets
             if not self.load_datasets():
                 return False
             
+            # Create dataset
             X, y, feature_names = self.create_dataset()
             
             if X is None:
@@ -246,11 +352,13 @@ class OceanPollutionPredictor:
             
             self.features = self._remove_duplicates(feature_names)
             
+            # Print class distribution
             print(f"\nClass distribution:")
             unique, counts = np.unique(y, return_counts=True)
             for cls, count in zip(unique, counts):
                 print(f"  Class {self.classes[int(cls)]}: {count:,} samples ({count/len(y)*100:.1f}%)")
             
+            # Split data
             X_train, X_test, y_train, y_test = train_test_split(
                 X, y, test_size=0.2, random_state=42, stratify=y
             )
@@ -259,13 +367,16 @@ class OceanPollutionPredictor:
             print(f"  Training samples: {X_train.shape[0]:,}")
             print(f"  Testing samples: {X_test.shape[0]:,}")
             
+            # Scale features
             self.scaler = StandardScaler()
             X_train_scaled = self.scaler.fit_transform(X_train)
             X_test_scaled = self.scaler.transform(X_test)
             
+            # Determine optimal parameters
             n_estimators = min(200, X_train.shape[0] // 100)
             n_estimators = max(50, n_estimators)
             
+            # Train Random Forest
             self.model = RandomForestClassifier(
                 n_estimators=n_estimators,
                 max_depth=15,
@@ -280,8 +391,11 @@ class OceanPollutionPredictor:
             
             print(f"\nTraining Random Forest model...")
             print(f"  Number of trees: {n_estimators}")
+            print(f"  Features: {len(self.features)}")
+            
             self.model.fit(X_train_scaled, y_train)
             
+            # Evaluate model
             y_pred_train = self.model.predict(X_train_scaled)
             y_pred_test = self.model.predict(X_test_scaled)
             
@@ -293,7 +407,6 @@ class OceanPollutionPredictor:
             print(f"\nModel Evaluation:")
             print(f"  Training Accuracy: {train_accuracy:.4f}")
             print(f"  Test Accuracy: {test_accuracy:.4f}")
-            print(f"  Test Samples: {len(y_test):,}")
             print(f"  CV Mean Score: {cv_scores.mean():.4f} (±{cv_scores.std():.4f})")
             
             if hasattr(self.model, 'oob_score_'):
@@ -302,6 +415,7 @@ class OceanPollutionPredictor:
             print("\nClassification Report (Test Set):")
             print(classification_report(y_test, y_pred_test, target_names=self.classes))
             
+            # Confusion matrix
             cm = confusion_matrix(y_test, y_pred_test)
             print(f"\nConfusion Matrix:")
             print(f"           Predicted")
@@ -312,22 +426,27 @@ class OceanPollutionPredictor:
                     row += f" {cm[i, j]:6d}"
                 print(row)
             
+            # Feature importance
             importances = self.model.feature_importances_
             indices = np.argsort(importances)[::-1]
             
-            print(f"\nTop 15 Feature Importance:")
-            for i, idx in enumerate(indices[:15]):
-                print(f"  {i+1:2d}. {self.features[idx]:25s}: {importances[idx]:.4f}")
+            print(f"\nTop 10 Feature Importance:")
+            for i, idx in enumerate(indices[:10]):
+                if idx < len(self.features):
+                    print(f"  {i+1:2d}. {self.features[idx]:25s}: {importances[idx]:.4f}")
             
-            overfitting_warning = ""
+            # Overfitting check
             if train_accuracy - test_accuracy > 0.05:
-                overfitting_warning = " Possible overfitting detected!"
+                print(f"\nWARNING: Possible overfitting detected!")
+                print(f"  Train-Test Difference: {(train_accuracy - test_accuracy):.4f}")
             
-            print(f"\nOverfitting Check:{overfitting_warning}")
-            print(f"  Train-Test Difference: {(train_accuracy - test_accuracy):.4f}")
-            
+            # Save model and statistics
             self._save_model(test_accuracy, cv_scores.mean(), X.shape[0])
             self._save_feature_statistics()
+            
+            print("\n" + "="*60)
+            print("MODEL TRAINING COMPLETED SUCCESSFULLY")
+            print("="*60)
             
             return True
             
@@ -337,6 +456,7 @@ class OceanPollutionPredictor:
             return False
     
     def _save_feature_statistics(self):
+        """Save feature statistics to JSON file"""
         if self.feature_statistics:
             import json
             stats_path = 'models/feature_statistics.json'
@@ -348,6 +468,7 @@ class OceanPollutionPredictor:
             print(f"  Feature statistics saved to {stats_path}")
     
     def _load_feature_statistics(self):
+        """Load feature statistics from JSON file"""
         stats_path = 'models/feature_statistics.json'
         if os.path.exists(stats_path):
             import json
@@ -355,15 +476,19 @@ class OceanPollutionPredictor:
                 self.feature_statistics = json.load(f)
     
     def _save_model(self, accuracy, cv_score, sample_count):
+        """Save model and metadata"""
         os.makedirs('models', exist_ok=True)
         
+        # Save model and scaler
         joblib.dump(self.model, 'models/ocean_model.pkl')
         joblib.dump(self.scaler, 'models/ocean_scaler.pkl')
         
+        # Save features list
         with open('models/features.txt', 'w') as f:
             for feat in self.features:
                 f.write(f"{feat}\n")
         
+        # Save metadata
         metadata = {
             'training_date': datetime.now().isoformat(),
             'features': self.features,
@@ -384,6 +509,7 @@ class OceanPollutionPredictor:
         print(f"  Samples: {sample_count:,}")
     
     def load_model(self):
+        """Load trained model"""
         try:
             self.model = joblib.load('models/ocean_model.pkl')
             self.scaler = joblib.load('models/ocean_scaler.pkl')
@@ -411,9 +537,10 @@ class OceanPollutionPredictor:
             return False
     
     def predict(self, input_values):
+        """Make prediction for input values"""
         try:
+            # Find CHL value from input
             chl_value = None
-            
             for key, value in input_values.items():
                 if 'CHL' in key.upper() and 'UNCERTAINTY' not in key.upper():
                     try:
@@ -422,6 +549,7 @@ class OceanPollutionPredictor:
                     except:
                         continue
             
+            # If not found, try any CHL value
             if chl_value is None:
                 for key, value in input_values.items():
                     if 'CHL' in key.upper():
@@ -434,6 +562,7 @@ class OceanPollutionPredictor:
             if chl_value is None:
                 return {'error': 'CHL value is required'}
             
+            # Prepare features
             prepared = {}
             
             for feature in self.features:
@@ -473,14 +602,18 @@ class OceanPollutionPredictor:
                         else:
                             prepared[feature] = 0.0
             
+            # Create DataFrame with all features
             df = pd.DataFrame([prepared])
             
+            # Add missing features
             missing_features = set(self.features) - set(df.columns)
             for feat in missing_features:
                 df[feat] = 0.0
             
+            # Ensure correct feature order
             df = df[self.features]
             
+            # Scale and predict
             scaled = self.scaler.transform(df)
             pred = self.model.predict(scaled)[0]
             proba = self.model.predict_proba(scaled)[0]
@@ -506,8 +639,9 @@ class OceanPollutionPredictor:
             return {'error': str(e), 'traceback': traceback.format_exc()}
     
     def interactive_mode(self):
+        """Interactive prediction mode"""
         print("\n" + "=" * 60)
-        print("OCEAN POLLUTION PREDICTION")
+        print("OCEAN POLLUTION PREDICTION SYSTEM")
         print("=" * 60)
         print("Enter 'quit' to exit")
         print("=" * 60)
@@ -599,6 +733,7 @@ class OceanPollutionPredictor:
 
 
 def main():
+    """Main function"""
     print("=" * 70)
     print("OCEAN POLLUTION PREDICTION SYSTEM")
     print("=" * 70)
