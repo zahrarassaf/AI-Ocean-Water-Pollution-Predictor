@@ -354,27 +354,28 @@ class MarineDataManager:
     High-level manager for marine data download and processing.
     """
     
-    # Pre-defined marine dataset configurations
+    # Updated dataset configurations with correct filenames
     DATASET_CONFIGS = {
         'chlorophyll': {
             'url': 'https://drive.google.com/file/d/17YEvHDE9DmtLsXKDGYwrGD8OE46swNDc/view',
-            'filename': 'chlorophyll_concentration.nc',
-            'expected_vars': ['chl', 'lat', 'lon', 'time']
+            'filename': 'chlorophyll_full.nc',
+            'expected_vars': ['CHL', 'DIATO', 'DINO', 'GREEN', 'HAPTO', 
+                            'MICRO', 'NANO', 'PICO', 'PROCHLO', 'PROKAR']
         },
         'light_attenuation': {
             'url': 'https://drive.google.com/file/d/16DyROUrgvfRQRvrBS3W3Y4o44vd-ZB67/view',
-            'filename': 'diffuse_attenuation.nc',
-            'expected_vars': ['kd490', 'lat', 'lon', 'time']
+            'filename': 'kd490_only.nc',
+            'expected_vars': ['KD490']
         },
-        'water_clarity': {
+        'optical_properties': {
             'url': 'https://drive.google.com/file/d/1c3f92nsOCY5hJv3zy0SAPXf8WsAVYNVI/view',
-            'filename': 'secchi_depth.nc',
-            'expected_vars': ['zsd', 'lat', 'lon', 'time']
+            'filename': 'optical_properties.nc',
+            'expected_vars': ['CDM', 'BBP']
         },
         'primary_productivity': {
             'url': 'https://drive.google.com/file/d/1JapTCN9CLn_hy9CY4u3Gcanv283LBdXy/view',
             'filename': 'primary_productivity.nc',
-            'expected_vars': ['pp', 'lat', 'lon', 'time']
+            'expected_vars': ['PP']
         }
     }
     
@@ -474,11 +475,21 @@ class MarineDataManager:
                 expected_vars = self.DATASET_CONFIGS[dataset_name]['expected_vars']
                 actual_vars = validation.get('variables', []) + validation.get('coords', [])
                 
-                missing = set(expected_vars) - set(actual_vars)
+                # Normalize variable names for comparison
+                actual_vars_upper = [v.upper() for v in actual_vars]
+                
+                missing = []
+                for expected in expected_vars:
+                    expected_upper = expected.upper()
+                    # Check for exact match or partial match
+                    if not any(expected_upper in actual or actual in expected_upper 
+                              for actual in actual_vars_upper):
+                        missing.append(expected)
+                
                 if missing:
                     missing_vars[filename] = {
                         'dataset': dataset_name,
-                        'missing_variables': list(missing),
+                        'missing_variables': missing,
                         'expected': expected_vars,
                         'actual': actual_vars
                     }
@@ -523,6 +534,38 @@ class MarineDataManager:
         inventory['processed_count'] = len(inventory['processed_files'])
         
         return inventory
+    
+    def get_available_datasets(self) -> Dict:
+        """Get information about available datasets."""
+        available = {}
+        
+        for dataset_name, config in self.DATASET_CONFIGS.items():
+            filepath = self.raw_dir / config['filename']
+            
+            if filepath.exists():
+                try:
+                    with xr.open_dataset(filepath, engine='netcdf4') as ds:
+                        available[dataset_name] = {
+                            'filename': config['filename'],
+                            'variables': list(ds.data_vars),
+                            'dimensions': dict(ds.dims),
+                            'size_mb': filepath.stat().st_size / (1024 * 1024),
+                            'exists': True
+                        }
+                except Exception as e:
+                    available[dataset_name] = {
+                        'filename': config['filename'],
+                        'error': str(e),
+                        'exists': True
+                    }
+            else:
+                available[dataset_name] = {
+                    'filename': config['filename'],
+                    'exists': False,
+                    'url': config['url']
+                }
+        
+        return available
 
 
 def main():
@@ -545,6 +588,8 @@ def main():
                        help='Number of parallel downloads')
     parser.add_argument('--inventory', action='store_true',
                        help='Create data inventory without downloading')
+    parser.add_argument('--list', action='store_true',
+                       help='List available datasets and their status')
     
     args = parser.parse_args()
     
@@ -560,6 +605,11 @@ def main():
     
     try:
         manager = MarineDataManager(data_dir=args.output_dir)
+        
+        if args.list:
+            datasets = manager.get_available_datasets()
+            print(json.dumps(datasets, indent=2))
+            return
         
         if args.inventory:
             inventory = manager.create_data_inventory()
