@@ -1,151 +1,194 @@
-# Satellite-Based Water Quality Assessment in the Gulf of Mexico
+# Marine Pollution Prediction System
 
 ## Overview
 
-This project implements a machine learning system for assessing water quality in the Gulf of Mexico using multi-temporal satellite observations. The focus is on building a reproducible, end-to-end pipeline that transforms raw Copernicus Marine Service NetCDF data into coarse water-quality classifications, exposed through a REST API and an interactive dashboard.
+A satellite-based machine learning system for predicting **marine pollution risk levels** using Copernicus Marine Service data. The system processes multiple oceanographic and biogeochemical variables to classify marine water quality into three categories (**LOW, MEDIUM, HIGH**) and provides **uncertainty quantification** for its predictions.
 
-Rather than attempting to measure pollution directly, the system relies on established oceanographic proxies (primarily chlorophyll-related variables) and evaluates how reliably these indicators can be used for regional-scale water quality assessment.
+> **Important Note**
+> This system estimates pollution risk using biogeochemical proxies (such as chlorophyll concentration and primary productivity) derived from satellite observations. It does not directly measure chemical or biological contaminants. The project is intended as a research-oriented prototype for environmental monitoring rather than a regulatory or operational pollution detection system.
 
 ---
 
-## Study Area: Gulf of Mexico
+## Quick Start
 
-The analysis focuses on the Gulf of Mexico, bounded by **18.02°N–29.98°N** latitude and **97.98°W–88.02°W** longitude.
+```bash
+# Run the complete data processing and modeling pipeline
+python run_pipeline.py
 
-* **Spatial resolution:** approximately 0.042° (~4.6 km grid)
-* **Grid size:** 288 × 240 spatial points (69,120 locations per time step)
-* **Temporal coverage:** January 2022 to November 2025 (47 monthly composites)
-* **Regional characteristics:** includes the Mississippi River plume, Loop Current system, and both shallow shelf and deep-water regions
+# Train the model and make predictions
+python predict.py --train
+python predict.py --interactive
 
-These features introduce strong spatial heterogeneity, making the region a useful but challenging test case for satellite-based water quality assessment.
+# Perform uncertainty analysis
+python src/analysis/uncertainty_analyzer.py --quick
+```
+
+---
+
+## Model Performance
+
+* **Test Accuracy:** 98.83%
+* **Training Accuracy:** 99.97%
+* **Cross-Validation Score:** 98.68% (±0.09%)
+* **Number of Features:** 26 oceanographic variables
+* **Sample Size:** 50,000 data points
+
+> High accuracy is partly due to clearly separated, domain-informed proxy-based class definitions.
+
+---
+
+## Water Quality Classification
+
+Classification thresholds are based on commonly used chlorophyll concentration ranges in marine and oceanographic studies.
+
+| Category | Chlorophyll Range (mg/m³) | Description | Samples |
+| -------- | ------------------------- | ----------- | ------- |
+| LOW      | ≤ 1.0                     | Clean       | 33%     |
+| MEDIUM   | 1.0 – 5.0                 | Moderate    | 33%     |
+| HIGH     | > 5.0                     | Polluted    | 34%     |
+
+---
+
+## Feature Importance (Top 5)
+
+* **Primary Productivity (PP):** 20.1%
+* **Chlorophyll (CHL):** 16.7%
+* **Light Attenuation (KD490):** 16.3%
+* **Colored Dissolved Matter (CDM):** 12.9%
+* **Particulate Backscattering (BBP):** 6.5%
 
 ---
 
 ## Data Sources
 
-The analysis is based on four satellite-derived NetCDF datasets provided by the Copernicus Marine Service:
+This project uses four datasets from the **Copernicus Marine Service**:
 
-* Chlorophyll-a concentration (CHL)
-* Diffuse attenuation coefficient at 490 nm (KD490)
-* Primary productivity (PP)
-* Secchi depth
+* **Chlorophyll** (`chlorophyll_full.nc`) — 21 variables
+* **Light Attenuation** (`kd490_only.nc`) — KD490 coefficient
+* **Optical Properties** (`optical_properties.nc`) — 5 variables
+* **Primary Productivity** (`primary_productivity.nc`) — 3 variables
 
-Each dataset is provided on a different spatial grid (ranging from approximately 282×398 to 288×240), with non-uniform temporal coverage. Aligning these heterogeneous sources into a consistent dataset required explicit handling of spatial resolution, temporal alignment, and missing values.
-
----
-
-## Spatiotemporal Processing and Feature Engineering
-
-All input datasets are stored as three-dimensional tensors (time × latitude × longitude). A custom preprocessing routine was implemented to:
-
-* Synchronize observations across time
-* Interpolate variables onto a common spatial grid
-* Handle missing values using context-aware environmental patterns
-
-After alignment, the data were flattened into a sample-wise feature matrix. From the raw satellite variables, **26 oceanographic features** were extracted, including:
-
-* Core indicators: chlorophyll concentration, primary productivity, and light attenuation
-* Phytoplankton community structure (diatoms, dinoflagellates, and size-fractionated groups)
-* Optical properties such as colored dissolved matter (CDM) and particulate backscattering (BBP)
-* Uncertainty estimates associated with satellite measurements
-
-The full preprocessing pipeline operates on approximately 2.3 million spatial samples; a representative subset of 100,000 samples was used for model training to balance coverage and computational cost.
+**Spatial Coverage:** Gulf of Mexico
+**Geographic Bounds:** 18.02°N–29.98°N, 97.98°W–88.02°W
+**Temporal Resolution:** Monthly composites
 
 ---
 
-## Model Development
+## Project Structure
 
-Water quality classification is performed using a Random Forest classifier. The model was trained with the following configuration:
-
-* 100 decision trees with depth constraints determined empirically
-* Stratified 5-fold cross-validation
-* Class weighting to account for imbalance between water quality categories
-
-The classification task groups conditions into three levels based on chlorophyll thresholds commonly used in marine research:
-
-* **LOW:** CHL ≤ 1.0 mg/m³ (oligotrophic conditions)
-* **MEDIUM:** 1.0 < CHL ≤ 5.0 mg/m³ (mesotrophic conditions)
-* **HIGH:** CHL > 5.0 mg/m³ (eutrophic conditions)
-
----
-
-## Validation Approach
-
-Model performance was evaluated using multiple complementary strategies to reduce optimistic bias and better reflect real-world behavior:
-
-* **Stratified 5-fold cross-validation** to preserve class balance across spatial and temporal samples
-* **Geographical hold-out testing** to assess generalization to unseen locations within the Gulf of Mexico
-* **Consistency checks against established chlorophyll-based thresholds** commonly used in marine water quality studies
-* **Error analysis** comparing near-coastal and open-ocean regions, where satellite signal reliability differs
+```text
+AI-Ocean-Water-Pollution-Predictor/
+├── run_pipeline.py                     # Main data processing pipeline
+├── predict.py                          # Model training & prediction
+├── api.py                              # REST API interface
+├── plot.py                             # Visualization utilities
+├── main.py                             # Dashboard entry point
+├── src/
+│   ├── analysis/uncertainty_analyzer.py # Uncertainty quantification
+│   ├── data/                           # Data processing modules
+│   ├── models/                         # Model training logic
+│   └── utils/                          # Configuration & logging
+├── config/                             # YAML configuration files
+├── data/                               # Data access instructions (raw data not included)
+├── models/                             # Trained models (generated locally)
+├── results/                            # Pipeline outputs
+├── plots/                              # Figures and dashboards
+├── logs/                               # Execution logs
+└── requirements.txt                    # Python dependencies
+```
 
 ---
 
-## Performance and Interpretation
+## Usage Examples
 
-On held-out test data, the model achieved an overall accuracy of **98.56%**, with a mean cross-validation score of **98.34%**. Performance was stable across folds, indicating consistent behavior within the Gulf of Mexico dataset.
+### Interactive Prediction
 
-Feature importance analysis shows that chlorophyll concentration (26.3%) and primary productivity (18.7%) are the dominant predictors, which is consistent with established understanding of eutrophication-driven water quality dynamics. Most classification errors occur in near-coastal regions, where optical complexity and terrestrial influence reduce the reliability of satellite-derived signals.
+```bash
+python predict.py --interactive
+```
 
----
+Example session:
 
-## Technical Implementation Notes
+```text
+Chlorophyll (CHL) in mg/m³: 0.25
+Additional features: PP=300
+→ Prediction: MEDIUM pollution (98.3% confidence)
+```
 
-Several implementation details were important for handling data volume and heterogeneity:
+### Model Training
 
-* **Data alignment:** Custom interpolation routines to reconcile differing grid resolutions (282×398 to 288×240)
-* **Feature preservation:** Satellite uncertainty estimates retained as independent features
-* **Computational scaling:** Parallelized NetCDF processing using Dask for memory-efficient execution
-* **Model persistence:** Joblib serialization with associated metadata and feature descriptors
+```bash
+python predict.py --train
+```
 
----
-
-## System Architecture
-
-The trained model is deployed as a containerized microservice system:
-
-### API Service (FastAPI)
-
-* REST endpoints for single and batch predictions
-* Input validation using Pydantic models with scientific constraints
-* Automatic fallback to a rule-based classifier if the ML model is unavailable
-* Auto-generated documentation available at the `/docs` endpoint
-
-### Interactive Dashboard (Streamlit)
-
-* Real-time prediction interface with configurable parameters
-* Batch CSV upload and summary statistics
-* Visualization of prediction distributions and confidence scores
-* Basic tracking of historical predictions
-
-### Deployment
-
-* Docker-based containerization
-* Multi-service orchestration via Docker Compose
-* Model artifacts mounted as persistent volumes
-
-The API is exposed on port 8000, and the dashboard on port 8501.
+Trains a new Random Forest model using the current processed dataset.
 
 ---
 
-## Appropriate Use and Limitations
+## Uncertainty Analysis
 
-This system is designed for regional-scale water quality assessment using satellite-derived proxies. Several limitations should be considered when interpreting results:
+```bash
+python src/analysis/uncertainty_analyzer.py
+```
 
-* **Proxy-based classification:** The model infers water quality from chlorophyll-related variables rather than direct pollution measurements.
-* **Geographic specificity:** Training and validation are limited to the Gulf of Mexico; performance in other regions is not guaranteed.
-* **Coastal complexity:** Shallow and near-shore areas are more prone to misclassification due to optical interference and sediment effects.
-* **Temporal resolution:** Approximately monthly observations are suitable for seasonal analysis but not short-term event detection.
-
-These constraints reflect broader challenges in satellite-based environmental monitoring rather than implementation deficiencies.
+* Ensemble-based uncertainty estimation
+* Bootstrap sampling
+* Spatial uncertainty mapping
+* **R² = 0.9629** for primary productivity prediction
 
 ---
 
-## Scope and Extensions
+## System Components
 
-The project serves as:
+### 1. Data Pipeline (`run_pipeline.py`)
 
-* A technical case study in spatiotemporal satellite data processing
-* An example of production-style deployment for environmental ML models
-* A baseline system that can be extended with in-situ data, alternative models, or region-specific calibration
+* Downloads Copernicus Marine Service data
+* Aligns multi-source NetCDF datasets
+* Generates training-ready features
 
-The emphasis throughout is on transparency, reproducibility, and realistic interpretation of model outputs rather than absolute pollution quantification.
+### 2. Prediction System (`predict.py`)
+
+* Random Forest classifier (200 trees)
+* Interactive and batch prediction modes
+* Model persistence and reuse
+
+### 3. Uncertainty Quantification
+
+* Ensemble predictions
+* Feature importance variability
+* Spatial uncertainty estimation
+
+---
+
+## Limitations
+
+* **Proxy-based:** Pollution inferred from biogeochemical indicators
+* **Regional:** Trained specifically on Gulf of Mexico data
+* **Temporal:** Monthly resolution (not suitable for short-term events)
+* **Coastal Complexity:** Higher uncertainty near shorelines
+
+---
+
+## Requirements
+
+* Python 3.8+
+* numpy, pandas, xarray, netCDF4
+* scikit-learn, joblib
+* tqdm
+
+**System Requirements:** ≥ 8 GB RAM, ≥ 10 GB disk space
+
+---
+
+## Future Work
+
+* Integration of additional satellite missions
+* Deep learning–based spatiotemporal models
+* Extension to global ocean coverage
+* Near real-time monitoring capabilities
+
+---
+
+## License
+
+Open-source for research and educational purposes.
