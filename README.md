@@ -191,4 +191,6 @@ python src/analysis/uncertainty_analyzer.py
 
 ## License
 
-Open-source for research and educational purposes.
+This project is released under the MIT License.
+
+You are free to use, modify, and distribute this software for research, educational, and commercial purposes, provided that the original copyright notice and license are included.
